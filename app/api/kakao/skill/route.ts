@@ -5,7 +5,7 @@ import { getHistory, addTurn } from '@/lib/kakao-history';
 import { generateReply } from '@/lib/kakao-service';
 
 const SKILL_SECRET = process.env.KAKAO_SKILL_SECRET ?? '';
-const TIMEOUT_MS = 4800;
+const TIMEOUT_MS = 4500;
 const ALLOW_METHODS = 'POST, OPTIONS, HEAD';
 
 function isAuthorized(req: NextRequest): boolean {
