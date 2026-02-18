@@ -5,7 +5,8 @@ import { getHistory, addTurn } from '@/lib/kakao-history';
 import { generateReply } from '@/lib/kakao-service';
 
 const SKILL_SECRET = process.env.KAKAO_SKILL_SECRET ?? '';
-const TIMEOUT_MS = 4500;
+const TIMEOUT_MS = 9000;
+const ALLOW_METHODS = 'GET, POST, OPTIONS, HEAD';
 
 function isAuthorized(req: NextRequest): boolean {
   // secret이 설정되지 않은 경우 통과 (개발 환경)
@@ -18,6 +19,27 @@ function isAuthorized(req: NextRequest): boolean {
 
 export async function GET() {
   return NextResponse.json({ status: 'ok', endpoint: '/api/kakao/skill' });
+}
+
+export async function OPTIONS() {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      Allow: ALLOW_METHODS,
+      'Access-Control-Allow-Methods': ALLOW_METHODS,
+      'Access-Control-Allow-Headers': 'Content-Type, x-skill-secret',
+      'Access-Control-Allow-Origin': '*',
+    },
+  });
+}
+
+export async function HEAD() {
+  return new Response(null, {
+    status: 200,
+    headers: {
+      Allow: ALLOW_METHODS,
+    },
+  });
 }
 
 export async function POST(req: NextRequest) {
