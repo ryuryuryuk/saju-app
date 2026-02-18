@@ -5,7 +5,7 @@ import { getHistory, addTurn } from '@/lib/kakao-history';
 import { generateReply } from '@/lib/kakao-service';
 
 const SKILL_SECRET = process.env.KAKAO_SKILL_SECRET ?? '';
-const TIMEOUT_MS = 9000;
+const TIMEOUT_MS = 4500;
 const ALLOW_METHODS = 'GET, POST, OPTIONS, HEAD';
 
 function isAuthorized(req: NextRequest): boolean {
@@ -27,8 +27,10 @@ export async function OPTIONS() {
     headers: {
       Allow: ALLOW_METHODS,
       'Access-Control-Allow-Methods': ALLOW_METHODS,
-      'Access-Control-Allow-Headers': 'Content-Type, x-skill-secret',
+      'Access-Control-Allow-Headers': 'Content-Type, x-skill-secret, Authorization',
       'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Credentials': 'true',
+
     },
   });
 }
@@ -80,7 +82,12 @@ export async function POST(req: NextRequest) {
     addTurn(userId, 'assistant', reply);
 
     // 6. 카카오 포맷으로 반환
-    return NextResponse.json(simpleTextResponse(reply));
+    return NextResponse.json(simpleTextResponse(reply),{
+      headers: {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Credentials': 'true',
+      }
+    });
   } catch (err) {
     console.error('[kakao/skill] unhandled error:', err);
     // 에러 시에도 카카오 포맷 200 반환 (오픈빌더 fallback 방지)
