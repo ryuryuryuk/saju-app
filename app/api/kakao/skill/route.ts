@@ -16,6 +16,10 @@ function isAuthorized(req: NextRequest): boolean {
   return headerSecret === SKILL_SECRET || querySecret === SKILL_SECRET;
 }
 
+export async function GET() {
+  return NextResponse.json({ status: 'ok', endpoint: '/api/kakao/skill' });
+}
+
 export async function POST(req: NextRequest) {
   // 1. 인증
   if (!isAuthorized(req)) {
