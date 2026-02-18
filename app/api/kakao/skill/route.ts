@@ -40,6 +40,10 @@ export async function HEAD() {
     status: 200,
     headers: {
       Allow: ALLOW_METHODS,
+            'Access-Control-Allow-Methods': ALLOW_METHODS,
+
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Credentials': 'true',
     },
   });
 }
