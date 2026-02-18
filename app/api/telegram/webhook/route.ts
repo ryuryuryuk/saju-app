@@ -11,9 +11,16 @@ export const maxDuration = 60;
 
 async function handleMessage(chatId: number, userId: string, utterance: string) {
   try {
-    // 타이핑 표시 + 안내 메시지
+    // 타이핑 표시 + 대화 유도 메시지
     await sendChatAction(chatId);
-    await sendMessage(chatId, '분석중입니다. 잠시만 기다려주세요...');
+    const waitingMessages = [
+      '사주 분석을 준비하고 있어요. 혹시 요즘 특별히 고민되는 영역이 있나요? (연애, 직장, 건강, 재물 등)',
+      '분석 결과를 만들고 있어요. 궁금한 점이 있다면 다음 메시지로 보내주세요! (예: 올해 이직 운은 어떤가요?)',
+      '사주 해석 중이에요. 참고로, 분석 후에 궁합이나 올해 운세도 물어볼 수 있어요!',
+      '열심히 분석 중이에요. 혹시 태어난 시간이 정확한가요? 시간에 따라 해석이 크게 달라질 수 있어요.',
+    ];
+    const randomMsg = waitingMessages[Math.floor(Math.random() * waitingMessages.length)];
+    await sendMessage(chatId, randomMsg);
 
     // 대화 히스토리 로드 + 사용자 발화 저장
     const history = getHistory(userId);
