@@ -6,7 +6,7 @@ import { generateReply } from '@/lib/kakao-service';
 
 const SKILL_SECRET = process.env.KAKAO_SKILL_SECRET ?? '';
 const TIMEOUT_MS = 4500;
-const ALLOW_METHODS = 'GET, POST, OPTIONS, HEAD';
+const ALLOW_METHODS = 'POST, OPTIONS, HEAD';
 
 function isAuthorized(req: NextRequest): boolean {
   // secret이 설정되지 않은 경우 통과 (개발 환경)
@@ -15,10 +15,6 @@ function isAuthorized(req: NextRequest): boolean {
   const headerSecret = req.headers.get('x-skill-secret');
   const querySecret = req.nextUrl.searchParams.get('secret');
   return headerSecret === SKILL_SECRET || querySecret === SKILL_SECRET;
-}
-
-export async function GET() {
-  return NextResponse.json({ status: 'ok', endpoint: '/api/kakao/skill' });
 }
 
 export async function OPTIONS() {
