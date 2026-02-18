@@ -302,17 +302,20 @@ export async function generateReply(
   };
 
   try {
-    const saju = await calculateSajuFromAPI(safeProfile);
+    // 사주 API + RAG 검색 병렬 실행 (카카오 5초 타임아웃 대응)
+    const questionForSearch = cleanUtterance.replace(/\s+/g, ' ').slice(0, 120);
+    const preliminaryRagQuery = `사주 분석 ${questionForSearch}`;
+
+    const [saju, preliminaryChunks] = await Promise.all([
+      calculateSajuFromAPI(safeProfile),
+      retrieveClassicChunks(preliminaryRagQuery),
+    ]);
+
     const structure = analyzeSajuStructure(saju);
     const yukchin = analyzeSajuYukchin(saju);
     const yukchinText = formatYukchinString(yukchin);
 
-    const questionForSearch = cleanUtterance.replace(/\s+/g, ' ').slice(0, 120);
-    const ragQuery =
-      `사주 ${saju.fullString} 일간 ${structure.dayMaster.stem}${structure.dayMaster.element} ` +
-      `강약 ${structure.dayMaster.strength.label} 질문 ${questionForSearch}`;
-    const chunks = await retrieveClassicChunks(ragQuery);
-    const ragText = buildRagText(chunks);
+    const ragText = buildRagText(preliminaryChunks);
     const prior = formatHistory(history);
 
     const response = await client.chat.completions.create({
