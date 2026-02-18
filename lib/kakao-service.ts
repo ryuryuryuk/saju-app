@@ -6,7 +6,7 @@ import { supabase } from './supabase';
 import type { Turn } from './kakao-types';
 
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const MODEL = process.env.OPENAI_MODEL || 'gpt-4.1';
+const MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
 type Gender = '남성' | '여성';
 
