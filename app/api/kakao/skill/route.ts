@@ -53,35 +53,10 @@ export async function POST(req: NextRequest) {
   try {
     const body: KakaoSkillRequest = await req.json();
     const utterance = body?.userRequest?.utterance?.trim() ?? '';
-    const userId = body?.userRequest?.user?.id ?? 'anonymous';
 
-    // 2. 대화 히스토리 로드
-    const history = getHistory(userId);
+    // TODO: 테스트용 즉시 응답 — 실제 분석 로직 복원 필요
+    const reply = `분석중입니다. 입력: "${utterance}"`;
 
-    // 3. 사용자 발화 저장
-    addTurn(userId, 'user', utterance);
-
-    // 4. 4.5초 타임아웃으로 답변 생성
-    let reply: string;
-    try {
-      reply = await Promise.race([
-        generateReply(utterance, history),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('TIMEOUT')), TIMEOUT_MS),
-        ),
-      ]);
-    } catch (err) {
-      if (err instanceof Error && err.message === 'TIMEOUT') {
-        reply = '응답 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.';
-      } else {
-        throw err;
-      }
-    }
-
-    // 5. 어시스턴트 답변 저장
-    addTurn(userId, 'assistant', reply);
-
-    // 6. 카카오 포맷으로 반환
     return NextResponse.json(simpleTextResponse(reply),{
       headers: {
           'Access-Control-Allow-Origin': '*',
