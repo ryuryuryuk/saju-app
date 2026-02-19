@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import OpenAI from 'openai';
-import type { TelegramUpdate } from '@/lib/telegram';
-import { sendMessage, sendChatAction } from '@/lib/telegram';
+import type { TelegramUpdate, TelegramCallbackQuery } from '@/lib/telegram';
+import { sendMessage, sendChatAction, answerCallbackQuery } from '@/lib/telegram';
 import { addTurn } from '@/lib/kakao-history';
 import { generateReply, extractAndValidateProfile } from '@/lib/kakao-service';
 import {
@@ -13,6 +13,7 @@ import {
 } from '@/lib/user-profile';
 import type { UserProfile } from '@/lib/user-profile';
 import { trackInterest } from '@/lib/interest-helpers';
+import { getLatestLogId, markOpened, markPremiumConverted } from '@/lib/push-logger';
 
 const INTERIM_TIMEOUT_MS = 3000;
 
@@ -156,6 +157,79 @@ function getKeywordFallback(utterance: string): string {
     '겉으로는 담담한데 속으로는 많이 답답했을 것 같아.',
     '뭔가 결정의 갈림길에 서 있는 느낌이 드는데.',
   ]);
+}
+
+async function handleCallbackQuery(query: TelegramCallbackQuery): Promise<void> {
+  const callbackId = query.id;
+  const data = query.data;
+  const chatId = query.message?.chat.id;
+  const userId = String(query.from.id);
+
+  if (!chatId) {
+    await answerCallbackQuery(callbackId);
+    return;
+  }
+
+  try {
+    switch (data) {
+      case 'premium_daily': {
+        // 유료 결제 플로우 - 전체 풀이 안내 + 로그 기록
+        await answerCallbackQuery(callbackId);
+        getLatestLogId(userId).then((logId) => {
+          if (logId) {
+            markOpened(logId).catch(() => {});
+            markPremiumConverted(logId).catch(() => {});
+          }
+        }).catch(() => {});
+        await sendMessage(
+          chatId,
+          '🔓 *전체 풀이 서비스*\n\n' +
+            '블랭크 처리된 부분을 포함한 상세 분석을 받아보세요.\n\n' +
+            '• 오늘의 핵심 시간대\n' +
+            '• 행운의 방위와 색상\n' +
+            '• 주의해야 할 상황\n' +
+            '• 구체적인 행동 가이드\n\n' +
+            '💎 프리미엄 서비스 준비 중입니다.\n' +
+            '출시되면 알려드릴게요!',
+          { parseMode: 'Markdown' },
+        );
+        break;
+      }
+
+      case 'chat_start': {
+        // 일반 채팅 연결 + 로그 기록
+        await answerCallbackQuery(callbackId, { text: '질문을 입력해주세요!' });
+        getLatestLogId(userId).then((logId) => {
+          if (logId) markOpened(logId).catch(() => {});
+        }).catch(() => {});
+        const profile = await getProfile('telegram', userId);
+        if (profile) {
+          await sendMessage(
+            chatId,
+            '💬 궁금한 점을 자유롭게 물어보세요!\n\n' +
+              '예시:\n' +
+              '• "오늘 중요한 미팅이 있는데 어떨까?"\n' +
+              '• "이번 달 재물운은 어때?"\n' +
+              '• "그 사람이랑 연락해도 될까?"',
+          );
+        } else {
+          await sendMessage(
+            chatId,
+            '먼저 프로필을 등록해주세요!\n\n' +
+              '생년월일시와 성별을 보내주시면 맞춤 분석을 시작할 수 있어요.\n' +
+              '예: 1994년 10월 3일 오후 7시 30분 여성',
+          );
+        }
+        break;
+      }
+
+      default:
+        await answerCallbackQuery(callbackId);
+    }
+  } catch (err: unknown) {
+    console.error('[telegram] handleCallbackQuery error:', err);
+    await answerCallbackQuery(callbackId, { text: '오류가 발생했습니다.' });
+  }
 }
 
 async function handleMessage(
@@ -305,6 +379,13 @@ export async function POST(req: NextRequest) {
 
   try {
     const update: TelegramUpdate = await req.json();
+
+    // 인라인 버튼 클릭 (callback_query) 처리
+    if (update.callback_query) {
+      await handleCallbackQuery(update.callback_query);
+      return NextResponse.json({ ok: true });
+    }
+
     const message = update.message;
 
     if (!message?.text) {

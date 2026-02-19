@@ -68,6 +68,77 @@ export async function deleteProfile(
   return !error;
 }
 
+/**
+ * 특정 플랫폼의 모든 프로필을 반환한다.
+ * 매일 운세 발송 대상 조회에 사용.
+ */
+export async function getAllProfiles(
+  platform: 'telegram' | 'kakao',
+): Promise<UserProfile[]> {
+  if (!supabase) return [];
+
+  const { data, error } = await supabase
+    .from('user_profiles')
+    .select('*')
+    .eq('platform', platform);
+
+  if (error || !data) return [];
+  return data as UserProfile[];
+}
+
+/**
+ * 최근 N일 이내 대화 기록이 있고 is_active = true인 사용자만 반환한다.
+ */
+export async function getActiveProfiles(
+  platform: 'telegram' | 'kakao',
+  days: number = 7,
+): Promise<UserProfile[]> {
+  if (!supabase) return [];
+
+  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+
+  // 최근 N일 내 대화한 사용자 ID 조회
+  const { data: activeIds, error: histErr } = await supabase
+    .from('conversation_history')
+    .select('platform_user_id')
+    .eq('platform', platform)
+    .gte('created_at', since);
+
+  if (histErr || !activeIds || activeIds.length === 0) return [];
+
+  const uniqueIds = [...new Set(activeIds.map((r) => r.platform_user_id))];
+
+  const { data, error } = await supabase
+    .from('user_profiles')
+    .select('*')
+    .eq('platform', platform)
+    .eq('is_active', true)
+    .in('platform_user_id', uniqueIds);
+
+  if (error || !data) return [];
+  return data as UserProfile[];
+}
+
+/**
+ * 봇 차단 등으로 사용자를 비활성화한다.
+ */
+export async function deactivateUser(
+  platform: string,
+  platformUserId: string,
+): Promise<void> {
+  if (!supabase) return;
+
+  const { error } = await supabase
+    .from('user_profiles')
+    .update({ is_active: false })
+    .eq('platform', platform)
+    .eq('platform_user_id', platformUserId);
+
+  if (error) {
+    console.error('[user-profile] deactivate error:', error.message);
+  }
+}
+
 // DB-backed conversation history
 
 const MAX_HISTORY_ROWS = 10;
