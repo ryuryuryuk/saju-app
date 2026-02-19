@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import OpenAI from 'openai';
 import type { TelegramUpdate } from '@/lib/telegram';
 import { sendMessage, sendChatAction } from '@/lib/telegram';
 import { addTurn } from '@/lib/kakao-history';
@@ -11,6 +12,8 @@ import {
   addDbTurn,
 } from '@/lib/user-profile';
 import type { UserProfile } from '@/lib/user-profile';
+
+const INTERIM_TIMEOUT_MS = 3000;
 
 const WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET ?? '';
 
@@ -45,6 +48,58 @@ async function tryParseAndSaveProfile(
     birth_minute: Number(validated.minute),
     gender: validated.gender,
   });
+}
+
+async function generateInterimMessage(utterance: string): Promise<string> {
+  try {
+    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const response = await client.chat.completions.create({
+      model: 'gpt-4o-mini',
+      temperature: 0.9,
+      max_completion_tokens: 80,
+      messages: [
+        {
+          role: 'system',
+          content: `너는 사주 상담 AI의 중간 응답 생성기다.
+사용자가 질문을 보냈고, 분석이 진행 중이다.
+사용자의 질문에서 심리와 감정을 읽고, 공감하거나 궁금증을 유발하는 짧은 멘트를 1~2문장으로 생성해라.
+
+규칙:
+- "분석중", "잠시만", "기다려" 같은 대기 표현 절대 금지.
+- 사용자의 감정에 직접 공감하거나, 질문 주제에 대한 흥미로운 힌트를 줘라.
+- 친한 친구처럼 따뜻하고 자연스러운 말투로 써라.
+- 이모지 사용 금지. 마크다운 금지.
+- 1~2문장, 60자 이내.`,
+        },
+        {
+          role: 'user',
+          content: utterance,
+        },
+      ],
+    });
+    const content = response.choices?.[0]?.message?.content?.trim();
+    if (content) return content;
+  } catch (err: unknown) {
+    console.error('[telegram] interim message generation failed:', err);
+  }
+  // fallback: 키워드 기반 메시지
+  return getKeywordFallback(utterance);
+}
+
+function getKeywordFallback(utterance: string): string {
+  if (/(연애|사랑|이별|짝|소개팅|결혼|궁합)/.test(utterance)) {
+    return '요즘 마음이 많이 복잡했을 것 같아. 네 사주에서 어떤 흐름이 보이는지 찬찬히 살펴볼게.';
+  }
+  if (/(직장|이직|취업|사업|회사|승진|퇴사)/.test(utterance)) {
+    return '커리어 고민이 있구나. 지금 시기에 어떤 에너지가 흐르는지 꼼꼼히 봐줄게.';
+  }
+  if (/(돈|재물|투자|주식|부동산|금전)/.test(utterance)) {
+    return '재물에 대한 고민이구나. 네 사주에서 돈의 흐름이 어떻게 움직이는지 볼게.';
+  }
+  if (/(건강|몸|아프|병원|체력)/.test(utterance)) {
+    return '건강이 걱정되는구나. 네 에너지 흐름을 보면서 주의할 점 짚어줄게.';
+  }
+  return '네 질문 잘 봤어. 사주에서 읽히는 게 있는데, 정리해서 알려줄게.';
 }
 
 async function handleMessage(
@@ -122,18 +177,7 @@ async function handleMessage(
       return;
     }
 
-    // 6. 프로필 있음 — 대화 유도 대기 메시지
-    const waitingMessages = [
-      '사주 분석을 준비하고 있어요. 혹시 요즘 특별히 고민되는 영역이 있나요? (연애, 직장, 건강, 재물 등)',
-      '분석 결과를 만들고 있어요. 궁금한 점이 있다면 다음 메시지로 보내주세요! (예: 올해 이직 운은 어떤가요?)',
-      '사주 해석 중이에요. 참고로, 분석 후에 궁합이나 올해 운세도 물어볼 수 있어요!',
-      '열심히 분석 중이에요. 혹시 태어난 시간이 정확한가요? 시간에 따라 해석이 크게 달라질 수 있어요.',
-    ];
-    const randomMsg =
-      waitingMessages[Math.floor(Math.random() * waitingMessages.length)];
-    await sendMessage(chatId, randomMsg);
-
-    // 7. DB 히스토리 로드 + 사용자 발화 저장
+    // 6. DB 히스토리 로드 + 사용자 발화 저장
     const dbHistory = await getDbHistory('telegram', userId);
     const history = dbHistory.map((h) => ({
       role: h.role as 'user' | 'assistant',
@@ -143,15 +187,40 @@ async function handleMessage(
     await addDbTurn('telegram', userId, 'user', utterance);
     addTurn(userId, 'user', utterance);
 
-    // 8. 저장된 프로필 기반 사주 분석
-    const reply = await generateReply(utterance, history, {
+    // 7. 분석 즉시 시작 + 중간 메시지 병렬 준비
+    const storedBirthProfile = {
       year: String(profile.birth_year),
       month: String(profile.birth_month),
       day: String(profile.birth_day),
       hour: String(profile.birth_hour),
       minute: String(profile.birth_minute),
       gender: profile.gender as '남성' | '여성',
-    });
+    };
+
+    const analysisPromise = generateReply(utterance, history, storedBirthProfile);
+    const interimPromise = generateInterimMessage(utterance);
+
+    // 8. 3초 레이스: 분석이 3초 안에 끝나면 중간 메시지 생략
+    const TIMEOUT = Symbol('timeout');
+    const raceResult = await Promise.race([
+      analysisPromise.then((r) => ({ type: 'done' as const, reply: r })),
+      new Promise<{ type: typeof TIMEOUT }>((resolve) =>
+        setTimeout(() => resolve({ type: TIMEOUT }), INTERIM_TIMEOUT_MS),
+      ),
+    ]);
+
+    let reply: string;
+
+    if (raceResult.type === 'done') {
+      // 3초 이내 완료 — 바로 발송
+      reply = raceResult.reply;
+    } else {
+      // 3초 초과 — 중간 메시지 발송 후 분석 대기
+      const interimMsg = await interimPromise;
+      await sendMessage(chatId, interimMsg);
+      await sendChatAction(chatId);
+      reply = await analysisPromise;
+    }
 
     // 9. 답변 저장 + 발송
     await addDbTurn('telegram', userId, 'assistant', reply);
