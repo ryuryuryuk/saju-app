@@ -55,21 +55,29 @@ async function generateInterimMessage(utterance: string): Promise<string> {
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const response = await client.chat.completions.create({
       model: 'gpt-4o-mini',
-      temperature: 0.9,
-      max_completion_tokens: 80,
+      temperature: 0.95,
+      max_completion_tokens: 120,
       messages: [
         {
           role: 'system',
-          content: `너는 사주 상담 AI의 중간 응답 생성기다.
-사용자가 질문을 보냈고, 분석이 진행 중이다.
-사용자의 질문에서 심리와 감정을 읽고, 공감하거나 궁금증을 유발하는 짧은 멘트를 1~2문장으로 생성해라.
+          content: `너는 사주 상담 AI다. 사용자의 질문을 받았고, 깊은 분석이 진행 중이다.
+사용자에게 보낼 "중간 메시지"를 생성해라. 이 메시지의 목표는:
+1) 사용자가 "이 AI가 내 마음을 읽었다"고 느끼게 만들기
+2) 다음에 올 분석 결과가 궁금해서 못 참게 만들기
 
-규칙:
-- "분석중", "잠시만", "기다려" 같은 대기 표현 절대 금지.
-- 사용자의 감정에 직접 공감하거나, 질문 주제에 대한 흥미로운 힌트를 줘라.
-- 친한 친구처럼 따뜻하고 자연스러운 말투로 써라.
-- 이모지 사용 금지. 마크다운 금지.
-- 1~2문장, 60자 이내.`,
+작성법:
+- 먼저 사용자 질문 뒤에 숨은 진짜 감정이나 상황을 짚어라. ("혹시 요즘 ~한 거 아니야?", "이 질문 뒤에 ~ 마음이 있는 것 같아.")
+- 그 다음 사주에서 뭔가 흥미로운 게 보인다는 뉘앙스로 떡밥을 던져라. ("근데 네 사주 보니까 재밌는 흐름이 하나 있거든.", "올해 흐름에서 의외의 포인트가 하나 보여.")
+- 구체적 분석 내용은 절대 말하지 마. 힌트만 줘서 기대감을 만들어라.
+
+톤:
+- 20대 친한 친구가 카페에서 눈 반짝이면서 "야 근데 이거 좀 신기한데?" 하는 느낌.
+- "~거든", "~지?", "~인데" 같은 구어체 자연스럽게 써라.
+
+금지:
+- "분석중", "잠시만", "기다려", "준비중" 같은 대기 표현 절대 금지.
+- 이모지, 마크다운, 번호, 불릿 금지.
+- 2~3문장, 80자 이내.`,
         },
         {
           role: 'user',
@@ -82,24 +90,23 @@ async function generateInterimMessage(utterance: string): Promise<string> {
   } catch (err: unknown) {
     console.error('[telegram] interim message generation failed:', err);
   }
-  // fallback: 키워드 기반 메시지
   return getKeywordFallback(utterance);
 }
 
 function getKeywordFallback(utterance: string): string {
   if (/(연애|사랑|이별|짝|소개팅|결혼|궁합)/.test(utterance)) {
-    return '요즘 마음이 많이 복잡했을 것 같아. 네 사주에서 어떤 흐름이 보이는지 찬찬히 살펴볼게.';
+    return '혹시 최근에 마음이 흔들리는 사람이 있는 거 아니야? 근데 네 사주에서 재밌는 흐름이 하나 보이거든.';
   }
   if (/(직장|이직|취업|사업|회사|승진|퇴사)/.test(utterance)) {
-    return '커리어 고민이 있구나. 지금 시기에 어떤 에너지가 흐르는지 꼼꼼히 봐줄게.';
+    return '요즘 현실적으로 고민이 많았을 것 같아. 근데 올해 흐름에서 의외의 포인트가 하나 있어.';
   }
   if (/(돈|재물|투자|주식|부동산|금전)/.test(utterance)) {
-    return '재물에 대한 고민이구나. 네 사주에서 돈의 흐름이 어떻게 움직이는지 볼게.';
+    return '돈 얘기가 나온 거 보면 요즘 좀 불안했지? 근데 네 사주에서 재물 쪽에 눈에 띄는 게 있거든.';
   }
   if (/(건강|몸|아프|병원|체력)/.test(utterance)) {
-    return '건강이 걱정되는구나. 네 에너지 흐름을 보면서 주의할 점 짚어줄게.';
+    return '몸이 좀 안 좋았구나. 근데 네 에너지 흐름 보니까 특별히 신경 써야 할 시기가 보여.';
   }
-  return '네 질문 잘 봤어. 사주에서 읽히는 게 있는데, 정리해서 알려줄게.';
+  return '이 질문 뒤에 꽤 깊은 고민이 있는 것 같아. 근데 사주에서 흥미로운 흐름이 하나 읽히거든.';
 }
 
 async function handleMessage(
