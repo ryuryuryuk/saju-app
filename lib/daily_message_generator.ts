@@ -6,6 +6,8 @@ import {
   CATEGORY_EMOJI,
   DAILY_BUTTONS,
   DAILY_PUSH_SYSTEM_PROMPT,
+  FULL_DAILY_SYSTEM_PROMPT,
+  HINT_DAILY_SYSTEM_PROMPT,
   getWeekdayBaseCategories,
   mapInterestToDailyCategory,
   type DailyMessageCategory,
@@ -233,4 +235,112 @@ export async function generateDailyMessage(userId: number): Promise<DailyMessage
 
 export async function generate_daily_message(user_id: number): Promise<DailyMessageResult> {
   return generateDailyMessage(user_id);
+}
+
+/**
+ * 프리미엄 사용자용: 블랭크 없는 전체 풀이 메시지 생성.
+ */
+export async function generateFullDailyMessage(userId: number): Promise<string> {
+  const profile = await getProfile('telegram', String(userId));
+  if (!profile) return '프로필 정보를 찾을 수 없습니다. /profile 로 등록해주세요.';
+
+  const topInterests = await get_user_top_interests(userId);
+  const now = getSeoulNow();
+  const weekday = now.getUTCDay();
+  const categories = resolveDailyCategories(weekday, topInterests);
+  const persona = getPersona(profile);
+
+  const birthProfile: BirthProfile = {
+    birth_year: profile.birth_year,
+    birth_month: profile.birth_month,
+    birth_day: profile.birth_day,
+    birth_hour: profile.birth_hour,
+    birth_minute: profile.birth_minute,
+    gender: profile.gender,
+  };
+
+  const [natalSaju, todayGanji] = await Promise.all([
+    calculateSajuPillars(birthProfile),
+    getTodayGanji(profile.gender),
+  ]);
+
+  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  const dateText = formatSeoulDate(now);
+  const categoryText = categories.join(' + ');
+
+  const completion = await client.chat.completions.create({
+    model: MODEL,
+    temperature: 0.8,
+    max_completion_tokens: 600,
+    messages: [
+      { role: 'system', content: FULL_DAILY_SYSTEM_PROMPT },
+      {
+        role: 'user',
+        content: [
+          `[오늘 날짜] ${dateText}`,
+          `[관심 카테고리] ${categoryText}`,
+          `[사용자 페르소나] ${persona ?? '없음'}`,
+          `[사용자 사주 원국] ${natalSaju}`,
+          `[오늘의 천간지지] ${todayGanji}`,
+          '블랭크(████) 없이 모든 정보를 공개하여 500자 내외로 작성.',
+        ].join('\n'),
+      },
+    ],
+  });
+
+  return completion.choices?.[0]?.message?.content?.trim() || '전체 풀이 생성에 실패했습니다.';
+}
+
+/**
+ * 무료 사용자 "다음에 할게요" 클릭 시: 힌트 1개만 공개하는 메시지 생성.
+ */
+export async function generateHintMessage(userId: number): Promise<string> {
+  const profile = await getProfile('telegram', String(userId));
+  if (!profile) return '💫 내일도 아침에 찾아올게요 🌅';
+
+  const topInterests = await get_user_top_interests(userId);
+  const now = getSeoulNow();
+  const weekday = now.getUTCDay();
+  const categories = resolveDailyCategories(weekday, topInterests);
+  const persona = getPersona(profile);
+
+  const birthProfile: BirthProfile = {
+    birth_year: profile.birth_year,
+    birth_month: profile.birth_month,
+    birth_day: profile.birth_day,
+    birth_hour: profile.birth_hour,
+    birth_minute: profile.birth_minute,
+    gender: profile.gender,
+  };
+
+  const [natalSaju, todayGanji] = await Promise.all([
+    calculateSajuPillars(birthProfile),
+    getTodayGanji(profile.gender),
+  ]);
+
+  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  const dateText = formatSeoulDate(now);
+  const categoryText = categories.join(' + ');
+
+  const completion = await client.chat.completions.create({
+    model: MODEL,
+    temperature: 0.8,
+    max_completion_tokens: 180,
+    messages: [
+      { role: 'system', content: HINT_DAILY_SYSTEM_PROMPT },
+      {
+        role: 'user',
+        content: [
+          `[오늘 날짜] ${dateText}`,
+          `[관심 카테고리] ${categoryText}`,
+          `[사용자 페르소나] ${persona ?? '없음'}`,
+          `[사용자 사주 원국] ${natalSaju}`,
+          `[오늘의 천간지지] ${todayGanji}`,
+          '블랭크 1개만 해제. 150자 이내. 마지막에 "내일도 아침에 찾아올게요 🌅"',
+        ].join('\n'),
+      },
+    ],
+  });
+
+  return completion.choices?.[0]?.message?.content?.trim() || '💫 이것만 먼저 알려줄게 — 오늘 오후가 중요해!\n내일도 아침에 찾아올게요 🌅';
 }

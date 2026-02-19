@@ -120,6 +120,33 @@ export async function getActiveProfiles(
 }
 
 /**
+ * 유료 구독 상태를 확인한다.
+ */
+export async function isPremiumUser(
+  platform: string,
+  platformUserId: string,
+): Promise<boolean> {
+  if (!supabase) return false;
+
+  const { data, error } = await supabase
+    .from('user_profiles')
+    .select('is_premium, premium_expires_at')
+    .eq('platform', platform)
+    .eq('platform_user_id', platformUserId)
+    .single();
+
+  if (error || !data) return false;
+  if (!data.is_premium) return false;
+
+  // 만료일이 설정되어 있으면 확인
+  if (data.premium_expires_at) {
+    return new Date(data.premium_expires_at) > new Date();
+  }
+
+  return true;
+}
+
+/**
  * 봇 차단 등으로 사용자를 비활성화한다.
  */
 export async function deactivateUser(

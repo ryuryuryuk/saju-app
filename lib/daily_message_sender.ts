@@ -3,8 +3,6 @@ import { getActiveProfiles, deactivateUser } from '@/lib/user-profile';
 import { generateDailyMessage, type DailyMessageResult } from '@/lib/daily_message_generator';
 import { getRandomFallback } from '@/lib/fallback-templates';
 import { logPush } from '@/lib/push-logger';
-import type { DailyMessageCategory } from '@/lib/daily_message_templates';
-
 const PER_USER_DELAY_MS = 50; // 텔레그램 rate limit: 사용자 간 0.05초
 const MAX_RETRIES = 2;
 const RETRY_DELAY_MS = 500;
@@ -151,7 +149,7 @@ export async function sendDailyMessagesToAll(): Promise<DailySendReport> {
 
       logPush({
         user_id: userId,
-        category: usedFallback ? 'general' : (message.category as DailyMessageCategory),
+        category: usedFallback ? 'general' : message.category,
         message_text: message.text,
         status: 'failed',
       }).catch(() => {});

@@ -10,10 +10,12 @@ import {
   deleteProfile,
   getDbHistory,
   addDbTurn,
+  isPremiumUser,
 } from '@/lib/user-profile';
 import type { UserProfile } from '@/lib/user-profile';
 import { trackInterest } from '@/lib/interest-helpers';
 import { getLatestLogId, markOpened, markPremiumConverted } from '@/lib/push-logger';
+import { generateFullDailyMessage, generateHintMessage } from '@/lib/daily_message_generator';
 
 const INTERIM_TIMEOUT_MS = 3000;
 
@@ -173,26 +175,70 @@ async function handleCallbackQuery(query: TelegramCallbackQuery): Promise<void> 
   try {
     switch (data) {
       case 'premium_daily': {
-        // 유료 결제 플로우 - 전체 풀이 안내 + 로그 기록
         await answerCallbackQuery(callbackId);
         getLatestLogId(userId).then((logId) => {
-          if (logId) {
-            markOpened(logId).catch(() => {});
-            markPremiumConverted(logId).catch(() => {});
-          }
+          if (logId) markOpened(logId).catch(() => {});
         }).catch(() => {});
+
+        const premium = await isPremiumUser('telegram', userId);
+
+        if (premium) {
+          // 유료 사용자 → 전체 풀이 즉시 발송
+          await sendChatAction(chatId, 'typing');
+          const fullMsg = await generateFullDailyMessage(chatId);
+          await sendMessage(chatId, `🔓 *오늘의 전체 풀이*\n\n${fullMsg}`, { parseMode: 'Markdown' });
+          getLatestLogId(userId).then((logId) => {
+            if (logId) markPremiumConverted(logId).catch(() => {});
+          }).catch(() => {});
+        } else {
+          // 무료 사용자 → 유료 안내 메시지
+          await sendMessage(
+            chatId,
+            '🔮 *오늘의 전체 풀이를 열어볼까요?*\n\n' +
+              '포함 내용:\n' +
+              '✦ 블랭크 없는 상세 풀이\n' +
+              '✦ 시간대별 운세 (2시간 단위)\n' +
+              '✦ 오늘의 행운 포인트 3가지\n' +
+              '✦ 주의해야 할 사람/상황\n\n' +
+              '💎 1회 열람: 1,900원\n' +
+              '💎 월간 구독: 9,900원/월 (매일 자동 전체 풀이)',
+            {
+              parseMode: 'Markdown',
+              replyMarkup: {
+                inline_keyboard: [
+                  [
+                    { text: '💎 1회 결제', callback_data: 'premium_once' },
+                    { text: '💎 월간 구독', callback_data: 'premium_monthly' },
+                  ],
+                  [{ text: '다음에 할게요', callback_data: 'premium_skip' }],
+                ],
+              },
+            },
+          );
+        }
+        break;
+      }
+
+      case 'premium_once':
+      case 'premium_monthly': {
+        // TODO: 실제 결제 연동 시 여기에 PG 플로우 추가
+        await answerCallbackQuery(callbackId);
         await sendMessage(
           chatId,
-          '🔓 *전체 풀이 서비스*\n\n' +
-            '블랭크 처리된 부분을 포함한 상세 분석을 받아보세요.\n\n' +
-            '• 오늘의 핵심 시간대\n' +
-            '• 행운의 방위와 색상\n' +
-            '• 주의해야 할 상황\n' +
-            '• 구체적인 행동 가이드\n\n' +
-            '💎 프리미엄 서비스 준비 중입니다.\n' +
-            '출시되면 알려드릴게요!',
+          '💎 *결제 시스템 준비 중*\n\n' +
+            '곧 결제 기능이 오픈됩니다!\n' +
+            '오픈 시 가장 먼저 알려드릴게요 🙌',
           { parseMode: 'Markdown' },
         );
+        break;
+      }
+
+      case 'premium_skip': {
+        await answerCallbackQuery(callbackId);
+        await sendMessage(chatId, '알겠어요! 대신 오늘의 힌트 하나만 드릴게요 💫');
+        await sendChatAction(chatId, 'typing');
+        const hint = await generateHintMessage(chatId);
+        await sendMessage(chatId, hint);
         break;
       }
 
