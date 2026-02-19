@@ -50,7 +50,27 @@ async function tryParseAndSaveProfile(
   });
 }
 
-async function generateInterimMessage(utterance: string): Promise<string> {
+const INTERIM_STYLES = [
+  '사용자의 질문 속 감정을 정확히 짚어주는 한마디를 해라. 마치 오래 알던 친구가 "야 너 그거 때문에 그렇지?" 하는 느낌.',
+  '사용자가 미처 말하지 않은 숨은 걱정을 꿰뚫어 보는 질문을 던져라. "혹시 진짜 고민은 다른 데 있는 거 아니야?" 같은.',
+  '사용자의 상황에 대해 "나도 그랬는데" 식으로 공감한 뒤, 사주에서 의외의 단서가 보인다고 살짝 언급해라.',
+  '사용자의 질문을 더 깊이 파고드는 되물음을 해라. "근데 그게 진짜 원하는 거야, 아니면 불안해서 그런 거야?" 같은.',
+  '사용자의 고민 핵심을 한 문장으로 요약해주고, "근데 이거 사주로 보면 생각보다 단순한 문제가 아니거든" 식으로 호기심을 유발해라.',
+] as const;
+
+async function generateInterimMessage(
+  utterance: string,
+  history: { role: string; content: string }[],
+): Promise<string> {
+  const style = INTERIM_STYLES[Math.floor(Math.random() * INTERIM_STYLES.length)];
+
+  // 직전 어시스턴트 메시지들 추출 (중복 방지용)
+  const recentAssistantMsgs = history
+    .filter((h) => h.role === 'assistant')
+    .slice(-3)
+    .map((h) => h.content.slice(0, 100))
+    .join('\n');
+
   try {
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const response = await client.chat.completions.create({
@@ -60,24 +80,29 @@ async function generateInterimMessage(utterance: string): Promise<string> {
       messages: [
         {
           role: 'system',
-          content: `너는 사주 상담 AI다. 사용자의 질문을 받았고, 깊은 분석이 진행 중이다.
-사용자에게 보낼 "중간 메시지"를 생성해라. 이 메시지의 목표는:
-1) 사용자가 "이 AI가 내 마음을 읽었다"고 느끼게 만들기
-2) 다음에 올 분석 결과가 궁금해서 못 참게 만들기
+          content: `너는 사주 상담 AI다. 사용자의 질문에 대해 깊은 분석이 진행 중이고, 그 사이에 보낼 짧은 중간 메시지를 생성해라.
 
-작성법:
-- 먼저 사용자 질문 뒤에 숨은 진짜 감정이나 상황을 짚어라. ("혹시 요즘 ~한 거 아니야?", "이 질문 뒤에 ~ 마음이 있는 것 같아.")
-- 그 다음 사주에서 뭔가 흥미로운 게 보인다는 뉘앙스로 떡밥을 던져라. ("근데 네 사주 보니까 재밌는 흐름이 하나 있거든.", "올해 흐름에서 의외의 포인트가 하나 보여.")
-- 구체적 분석 내용은 절대 말하지 마. 힌트만 줘서 기대감을 만들어라.
+[이번 메시지 스타일]
+${style}
 
-톤:
-- 20대 친한 친구가 카페에서 눈 반짝이면서 "야 근데 이거 좀 신기한데?" 하는 느낌.
-- "~거든", "~지?", "~인데" 같은 구어체 자연스럽게 써라.
+[핵심 규칙]
+- 매번 다른 접근을 해라. 아래 "이전 메시지"와 구조, 문장 패턴, 키워드가 겹치면 안 된다.
+- "혹시 ~거 아니야? 근데 사주 보니까 재밌는 흐름이~" 같은 뻔한 공식 절대 반복 금지.
+- 사용자가 이전 대화 맥락 위에서 이어 질문한 경우, 그 흐름을 이해하고 자연스럽게 이어가라.
+- 구체적 분석 결과는 절대 말하지 마. 분석은 아직 안 끝났으니까.
 
-금지:
-- "분석중", "잠시만", "기다려", "준비중" 같은 대기 표현 절대 금지.
-- 이모지, 마크다운, 번호, 불릿 금지.
-- 2~3문장, 80자 이내.`,
+[톤]
+- 진짜 사람처럼 자연스럽게. 공식 느낌 나면 실패다.
+- 같은 사람이 쓴 것처럼 보이면 안 된다. 매번 살짝 다른 성격이 묻어나게.
+
+[금지]
+- "분석중", "잠시만", "기다려", "준비중" 같은 대기 표현.
+- "재밌는 흐름", "의외의 포인트", "흥미로운" — 이미 너무 많이 쓴 표현이니 다른 말로 바꿔라.
+- 이모지, 마크다운, 번호, 불릿.
+- 80자 이내.
+
+[이전에 보낸 메시지 — 절대 비슷하게 쓰지 마]
+${recentAssistantMsgs || '없음'}`,
         },
         {
           role: 'user',
@@ -94,19 +119,42 @@ async function generateInterimMessage(utterance: string): Promise<string> {
 }
 
 function getKeywordFallback(utterance: string): string {
+  // 랜덤 인덱스로 같은 카테고리에서도 다른 메시지 선택
+  const pick = (arr: string[]) => arr[Math.floor(Math.random() * arr.length)];
+
   if (/(연애|사랑|이별|짝|소개팅|결혼|궁합)/.test(utterance)) {
-    return '혹시 최근에 마음이 흔들리는 사람이 있는 거 아니야? 근데 네 사주에서 재밌는 흐름이 하나 보이거든.';
+    return pick([
+      '그 사람 때문에 요즘 잠이 잘 안 오지?',
+      '이 질문 하기까지 꽤 고민했을 것 같아.',
+      '마음이 끌리는데 확신이 안 서는 거지, 맞아?',
+    ]);
   }
   if (/(직장|이직|취업|사업|회사|승진|퇴사)/.test(utterance)) {
-    return '요즘 현실적으로 고민이 많았을 것 같아. 근데 올해 흐름에서 의외의 포인트가 하나 있어.';
+    return pick([
+      '지금 자리에서 버텨야 하나 나가야 하나, 그게 제일 답답하지.',
+      '사실 답은 어느 정도 정해놓고 확인받고 싶은 거 아니야?',
+      '요즘 일하면서 체력도 마음도 같이 빠지는 느낌이지?',
+    ]);
   }
   if (/(돈|재물|투자|주식|부동산|금전)/.test(utterance)) {
-    return '돈 얘기가 나온 거 보면 요즘 좀 불안했지? 근데 네 사주에서 재물 쪽에 눈에 띄는 게 있거든.';
+    return pick([
+      '돈 문제는 생각할수록 불안해지잖아, 이해해.',
+      '지금 뭔가 결정해야 하는 타이밍인 것 같은데.',
+      '쓸 데는 많고 들어오는 건 불안하고, 그런 시기지?',
+    ]);
   }
   if (/(건강|몸|아프|병원|체력)/.test(utterance)) {
-    return '몸이 좀 안 좋았구나. 근데 네 에너지 흐름 보니까 특별히 신경 써야 할 시기가 보여.';
+    return pick([
+      '몸이 보내는 신호가 있을 때 잡아야 해.',
+      '요즘 좀 무리한 거 아니야? 네 체질상 신경 쓸 부분이 있어.',
+      '건강 걱정이 다른 고민까지 키우잖아, 같이 봐줄게.',
+    ]);
   }
-  return '이 질문 뒤에 꽤 깊은 고민이 있는 것 같아. 근데 사주에서 흥미로운 흐름이 하나 읽히거든.';
+  return pick([
+    '이 질문 속에 꽤 오래 품어온 고민이 느껴져.',
+    '겉으로는 담담한데 속으로는 많이 답답했을 것 같아.',
+    '뭔가 결정의 갈림길에 서 있는 느낌이 드는데.',
+  ]);
 }
 
 async function handleMessage(
@@ -205,7 +253,7 @@ async function handleMessage(
     };
 
     const analysisPromise = generateReply(utterance, history, storedBirthProfile);
-    const interimPromise = generateInterimMessage(utterance);
+    const interimPromise = generateInterimMessage(utterance, dbHistory);
 
     // 8. 3초 레이스: 분석이 3초 안에 끝나면 중간 메시지 생략
     const TIMEOUT = Symbol('timeout');
