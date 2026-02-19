@@ -267,9 +267,15 @@ function needsProfileGuide(utterance: string, profile: BirthProfile | null): boo
   return sajuIntent || utterance.trim().length < 6;
 }
 
+export function extractAndValidateProfile(text: string): BirthProfile | null {
+  const partial = extractBirthProfile(text);
+  return validateProfile(partial);
+}
+
 export async function generateReply(
   utterance: string,
   history: Turn[],
+  storedProfile?: BirthProfile,
 ): Promise<string> {
   const cleanUtterance = utterance.trim();
   if (!cleanUtterance) {
@@ -280,26 +286,33 @@ export async function generateReply(
     return '현재 AI 분석 키 설정이 없어 답변을 생성할 수 없습니다. 관리자에게 OPENAI_API_KEY 설정을 요청해 주세요.';
   }
 
-  const merged = mergeProfileFromHistory(history, cleanUtterance);
-  const profile = validateProfile(merged);
+  // storedProfile이 있으면 DB에서 가져온 프로필 우선 사용
+  let safeProfile: BirthProfile;
 
-  if (needsProfileGuide(cleanUtterance, profile)) {
-    return [
-      '정확한 사주 분석을 위해 아래 정보를 한 줄로 보내주세요.',
-      '형식: YYYY년 M월 D일 (오전/오후) H시 M분 성별',
-      '예시: 1994년 10월 3일 오후 7시 30분 여성',
-      '태어난 시간을 모르면 "모름"이라고 보내주세요. (기본 12:00으로 추정 분석 가능)',
-    ].join('\n');
+  if (storedProfile) {
+    safeProfile = storedProfile;
+  } else {
+    const merged = mergeProfileFromHistory(history, cleanUtterance);
+    const profile = validateProfile(merged);
+
+    if (needsProfileGuide(cleanUtterance, profile)) {
+      return [
+        '정확한 사주 분석을 위해 아래 정보를 한 줄로 보내주세요.',
+        '형식: YYYY년 M월 D일 (오전/오후) H시 M분 성별',
+        '예시: 1994년 10월 3일 오후 7시 30분 여성',
+        '태어난 시간을 모르면 "모름"이라고 보내주세요. (기본 12:00으로 추정 분석 가능)',
+      ].join('\n');
+    }
+
+    safeProfile = profile ?? {
+      year: merged.year!,
+      month: merged.month!,
+      day: merged.day!,
+      hour: merged.hour ?? '12',
+      minute: merged.minute ?? '0',
+      gender: (merged.gender ?? '여성') as Gender,
+    };
   }
-
-  const safeProfile: BirthProfile = profile ?? {
-    year: merged.year!,
-    month: merged.month!,
-    day: merged.day!,
-    hour: merged.hour ?? '12',
-    minute: merged.minute ?? '0',
-    gender: (merged.gender ?? '여성') as Gender,
-  };
 
   try {
     // 사주 API + RAG 검색 병렬 실행 (카카오 5초 타임아웃 대응)
