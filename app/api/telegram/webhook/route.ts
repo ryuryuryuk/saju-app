@@ -12,6 +12,7 @@ import {
   addDbTurn,
 } from '@/lib/user-profile';
 import type { UserProfile } from '@/lib/user-profile';
+import { trackInterest } from '@/lib/interest-helpers';
 
 const INTERIM_TIMEOUT_MS = 3000;
 
@@ -241,6 +242,11 @@ async function handleMessage(
     }));
     await addDbTurn('telegram', userId, 'user', utterance);
     addTurn(userId, 'user', utterance);
+
+    // 관심사 추적 (fire-and-forget — 응답 속도에 영향 없도록)
+    trackInterest('telegram', userId, utterance).catch((err) =>
+      console.error('[telegram] trackInterest error:', err),
+    );
 
     // 7. 분석 즉시 시작 + 중간 메시지 병렬 준비
     const storedBirthProfile = {
