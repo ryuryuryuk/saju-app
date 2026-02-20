@@ -3,7 +3,7 @@ import OpenAI from 'openai';
 import type { TelegramUpdate, TelegramCallbackQuery } from '@/lib/telegram';
 import { sendMessage, sendChatAction, answerCallbackQuery, editMessageText, deleteMessage } from '@/lib/telegram';
 import { addTurn } from '@/lib/kakao-history';
-import { generateReply, extractAndValidateProfile } from '@/lib/kakao-service';
+import { generateReply, generateFirstReading, extractAndValidateProfile } from '@/lib/kakao-service';
 import {
   getProfile,
   upsertProfile,
@@ -72,6 +72,45 @@ function buildProgressBar(pct: number): string {
 
 function buildProgressText(header: string, pct: number, label: string): string {
   return `${header}\n\n${buildProgressBar(pct)} ${pct}%\n${label}`;
+}
+
+// --- Freemium blur helpers ---
+
+interface ParsedReply {
+  freeText: string;
+  premiumText: string;
+  hasPremium: boolean;
+}
+
+function parseFreemiumSections(raw: string): ParsedReply {
+  const freeMatch = raw.match(/\[FREE\]([\s\S]*?)\[\/FREE\]/);
+  const premiumMatch = raw.match(/\[PREMIUM\]([\s\S]*?)\[\/PREMIUM\]/);
+
+  if (!freeMatch && !premiumMatch) {
+    // No markers — treat entire reply as free
+    return { freeText: raw, premiumText: '', hasPremium: false };
+  }
+
+  const freeText = (freeMatch?.[1] ?? '').trim();
+  const premiumText = (premiumMatch?.[1] ?? '').trim();
+
+  return { freeText, premiumText, hasPremium: !!premiumText };
+}
+
+function blurText(text: string): string {
+  // Replace each word-like segment with █ blocks, preserving line breaks
+  return text
+    .split('\n')
+    .map((line) =>
+      line.replace(/\S+/g, (word) => '█'.repeat(Math.min(word.length, 6))),
+    )
+    .join('\n');
+}
+
+function cleanTags(text: string): string {
+  return text
+    .replace(/\[FREE\]|\[\/FREE\]|\[PREMIUM\]|\[\/PREMIUM\]/g, '')
+    .trim();
 }
 
 const INTERIM_STYLES = [
@@ -262,6 +301,66 @@ async function handleCallbackQuery(query: TelegramCallbackQuery): Promise<void> 
         break;
       }
 
+      case 'premium_unlock': {
+        await answerCallbackQuery(callbackId);
+        const premium = await isPremiumUser('telegram', userId);
+
+        if (premium) {
+          // 유료 사용자 → DB에서 마지막 어시스턴트 답변 full 버전 발송
+          const dbHist = await getDbHistory('telegram', userId);
+          const lastAssistant = [...dbHist].reverse().find((h) => h.role === 'assistant');
+          if (lastAssistant) {
+            const fullText = cleanTags(lastAssistant.content);
+            await sendMessage(chatId, `🔓 *전체 풀이*\n\n${fullText}`, { parseMode: 'Markdown' });
+          } else {
+            await sendMessage(chatId, '이전 분석 내역을 찾을 수 없습니다. 질문을 다시 보내주세요!');
+          }
+        } else {
+          // 무료 사용자 → 결제 안내
+          await sendMessage(
+            chatId,
+            '*지금 이 타이밍에 봐야 해*\n\n' +
+              '솔직히 말하면,\n' +
+              '방금 분석에서 *시기*가 나왔어.\n' +
+              '이거 놓치면 다음 기회가 언제인지 몰라.\n\n' +
+              '블러 친 부분에 있는 내용:\n' +
+              '→ *정확한 타이밍* (월/주 단위)\n' +
+              '→ *피해야 할 시기*\n' +
+              '→ *지금 당장 해야 할 것*\n\n' +
+              '커피 한 잔 값이야.\n' +
+              '근데 타이밍 놓치면 커피값보다 훨씬 크게 후회할걸?\n\n' +
+              '💎 *1,900원* — 이 질문 핵심 답변\n' +
+              '💎 *9,900원/월* — 무제한 상담',
+            {
+              parseMode: 'Markdown',
+              replyMarkup: {
+                inline_keyboard: [
+                  [
+                    { text: '⚡ 지금 열기 1,900원', callback_data: 'premium_once' },
+                  ],
+                  [
+                    { text: '🔥 무제한 9,900원/월', callback_data: 'premium_monthly' },
+                  ],
+                  [{ text: '괜찮아, 담에', callback_data: 'premium_skip_chat' }],
+                ],
+              },
+            },
+          );
+        }
+        break;
+      }
+
+      case 'premium_skip_chat': {
+        await answerCallbackQuery(callbackId);
+        await sendMessage(
+          chatId,
+          '알겠어.\n\n' +
+            '근데 아까 그 시기... 계속 신경 쓰이면 언제든 다시 물어봐.\n' +
+            '사주는 타이밍이 전부거든 🔮',
+        );
+        break;
+      }
+
       case 'chat_start': {
         // 일반 채팅 연결 + 로그 기록
         await answerCallbackQuery(callbackId, { text: '질문을 입력해주세요!' });
@@ -345,20 +444,65 @@ async function handleMessage(
       return;
     }
 
-    // 5. 프로필이 없으면 — 생년월일 파싱 → 저장 시도
+    // 5. 프로필이 없으면 — 생년월일 파싱 → 저장 → 무료 첫 분석 자동 발송
     if (!profile) {
       const saved = await tryParseAndSaveProfile(userId, utterance, displayName);
       if (saved) {
         await sendMessage(
           chatId,
-          `프로필을 저장했어요!\n\n` +
+          `프로필을 저장했어요! 🎉\n\n` +
             `생년월일: ${saved.birth_year}년 ${saved.birth_month}월 ${saved.birth_day}일\n` +
             `시간: ${saved.birth_hour}시 ${saved.birth_minute}분\n` +
             `성별: ${saved.gender}\n\n` +
-            `이제 궁금한 점을 자유롭게 물어보세요!\n` +
-            `"올해 연애운 어때?"\n` +
-            `"직장에서 이직할 타이밍인가?"\n` +
-            `"올해 전체 운세 알려줘"`,
+            `지금 바로 무료 사주 분석을 시작할게요...`,
+        );
+
+        // 첫 분석 진행률 표시 + 생성
+        const firstReadingProfile = {
+          year: String(saved.birth_year),
+          month: String(saved.birth_month),
+          day: String(saved.birth_day),
+          hour: String(saved.birth_hour),
+          minute: String(saved.birth_minute),
+          gender: saved.gender as '남성' | '여성',
+        };
+
+        const header = '🔮 사주 깊이 읽는 중...';
+        const progressResult = await sendMessage(
+          chatId,
+          buildProgressText(header, 0, '분석 시작'),
+        );
+        const progressMsgId = progressResult.messageId;
+
+        let step = 0;
+        const progressInterval = setInterval(() => {
+          if (step < PROGRESS_STAGES.length && progressMsgId) {
+            const stage = PROGRESS_STAGES[step];
+            editMessageText(
+              chatId,
+              progressMsgId,
+              buildProgressText(header, stage.pct, stage.label),
+            ).catch(() => {});
+            step++;
+          }
+        }, PROGRESS_INTERVAL_MS);
+
+        const firstReading = await generateFirstReading(firstReadingProfile, displayName);
+        clearInterval(progressInterval);
+        if (progressMsgId) await deleteMessage(chatId, progressMsgId).catch(() => {});
+
+        // 첫 분석 결과 발송
+        await addDbTurn('telegram', userId, 'assistant', firstReading);
+        await sendMessage(chatId, firstReading);
+
+        // 후속 질문 유도
+        await sendMessage(
+          chatId,
+          '궁금한 거 있으면 편하게 물어봐! 💬\n\n' +
+            '예시:\n' +
+            '• "올해 연애운 어때?"\n' +
+            '• "이직할 타이밍인가?"\n' +
+            '• "이번 달 재물운 알려줘"',
         );
         return;
       }
@@ -447,10 +591,47 @@ async function handleMessage(
       }
     }
 
-    // 9. 답변 저장 + 발송
+    // 9. 답변 저장 (full) + 블러 처리 후 발송
     await addDbTurn('telegram', userId, 'assistant', reply);
     addTurn(userId, 'assistant', reply);
-    await sendMessage(chatId, reply);
+
+    const parsed = parseFreemiumSections(reply);
+    if (parsed.hasPremium) {
+      // FREE 부분 발송 + PREMIUM 부분 블러 처리
+      const blurred = blurText(parsed.premiumText);
+
+      // 사용자 질문 맥락에 따른 티저 생성
+      const questionLower = utterance.toLowerCase();
+      let teaser = '🔒 *진짜 중요한 건 여기부터야*';
+      if (/연애|사랑|그\s?사람|썸|결혼|이별|재회/.test(questionLower)) {
+        teaser = '🔒 *근데 그 사람 마음은...*';
+      } else if (/돈|재물|투자|사업|주식|코인|부업/.test(questionLower)) {
+        teaser = '🔒 *돈 들어오는 타이밍이...*';
+      } else if (/취업|이직|회사|직장|면접|합격/.test(questionLower)) {
+        teaser = '🔒 *붙는 시기가 보여*';
+      } else if (/언제|시기|타이밍|시점/.test(questionLower)) {
+        teaser = '🔒 *정확한 시기를 말해줄게*';
+      } else if (/어떻게|방법|뭘\s?해야|어쩌지/.test(questionLower)) {
+        teaser = '🔒 *구체적으로 이렇게 해*';
+      }
+
+      const displayText =
+        parsed.freeText +
+        `\n\n${teaser}\n` +
+        blurred +
+        '\n\n_이 부분이 네 질문의 핵심 답이야_';
+
+      await sendMessage(chatId, displayText, {
+        parseMode: 'Markdown',
+        replyMarkup: {
+          inline_keyboard: [
+            [{ text: '👆 핵심 답변 열기', callback_data: 'premium_unlock' }],
+          ],
+        },
+      });
+    } else {
+      await sendMessage(chatId, reply);
+    }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : '알 수 없는 오류';
     console.error('[telegram] handleMessage error:', err);
