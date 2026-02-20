@@ -3,7 +3,7 @@ import OpenAI from 'openai';
 import type { TelegramUpdate, TelegramCallbackQuery } from '@/lib/telegram';
 import { sendMessage, sendChatAction, answerCallbackQuery, editMessageText, deleteMessage } from '@/lib/telegram';
 import { addTurn } from '@/lib/kakao-history';
-import { generateReply, generateFirstReading, extractAndValidateProfile } from '@/lib/kakao-service';
+import { generateReply, generateFirstReading, extractAndValidateProfile, calculateSajuFromAPI } from '@/lib/kakao-service';
 import {
   getProfile,
   upsertProfile,
@@ -16,6 +16,14 @@ import type { UserProfile } from '@/lib/user-profile';
 import { trackInterest } from '@/lib/interest-helpers';
 import { getLatestLogId, markOpened, markPremiumConverted } from '@/lib/push-logger';
 import { generateFullDailyMessage, generateHintMessage } from '@/lib/daily_message_generator';
+import {
+  isCompatibilityQuestion,
+  getPartnerProfileRequest,
+  generateCompatibilityAnalysis,
+} from '@/lib/compatibility';
+
+// 궁합 대기 상태 (userId -> 대기중)
+const compatibilityPending = new Map<string, { requestedAt: number; question: string }>();
 
 const INTERIM_TIMEOUT_MS = 3000;
 
@@ -520,7 +528,95 @@ async function handleMessage(
       return;
     }
 
-    // 6. DB 히스토리 로드 + 사용자 발화 저장
+    // 6. 궁합 분석 플로우
+    const pendingCompat = compatibilityPending.get(userId);
+    if (pendingCompat) {
+      // 상대방 프로필 대기 중 — 파싱 시도
+      const partnerParsed = extractAndValidateProfile(utterance);
+      if (partnerParsed) {
+        compatibilityPending.delete(userId);
+        await sendMessage(chatId, '💕 *궁합 분석 중...*', { parseMode: 'Markdown' });
+        await sendChatAction(chatId);
+
+        const myProfile = {
+          year: String(profile.birth_year),
+          month: String(profile.birth_month),
+          day: String(profile.birth_day),
+          hour: String(profile.birth_hour),
+          minute: String(profile.birth_minute),
+          gender: profile.gender as '남성' | '여성',
+        };
+        const partnerProfile = {
+          year: partnerParsed.year,
+          month: partnerParsed.month,
+          day: partnerParsed.day,
+          hour: partnerParsed.hour ?? '12',
+          minute: partnerParsed.minute ?? '0',
+          gender: (partnerParsed.gender ?? '여성') as '남성' | '여성',
+        };
+
+        try {
+          const [mySaju, partnerSaju] = await Promise.all([
+            calculateSajuFromAPI(myProfile),
+            calculateSajuFromAPI(partnerProfile),
+          ]);
+
+          const result = await generateCompatibilityAnalysis(
+            mySaju,
+            partnerSaju,
+            myProfile,
+            partnerProfile,
+            pendingCompat.question,
+          );
+
+          // FREE/PREMIUM 파싱 및 발송
+          const parsed = parseFreemiumSections(result);
+          if (parsed.hasPremium) {
+            const blurred = blurText(parsed.premiumText);
+            const displayText =
+              parsed.freeText +
+              '\n\n🔒 *조심해야 할 시기 + 장기 전망*\n' +
+              blurred +
+              '\n\n_이 관계의 핵심 포인트야_';
+
+            await sendMessage(chatId, displayText, {
+              parseMode: 'Markdown',
+              replyMarkup: {
+                inline_keyboard: [
+                  [{ text: '👆 전체 궁합 보기', callback_data: 'premium_unlock' }],
+                ],
+              },
+            });
+          } else {
+            await sendMessage(chatId, result, { parseMode: 'Markdown' });
+          }
+
+          // DB에 저장
+          await addDbTurn('telegram', userId, 'user', `궁합 질문: ${pendingCompat.question}`);
+          await addDbTurn('telegram', userId, 'assistant', result);
+        } catch (err) {
+          console.error('[telegram] compatibility analysis error:', err);
+          await sendMessage(chatId, '궁합 분석 중 오류가 발생했어요. 다시 시도해주세요!');
+        }
+        return;
+      } else {
+        // 파싱 실패 — 다시 요청
+        await sendMessage(
+          chatId,
+          '생년월일 형식을 확인해주세요!\n\n예: 1995년 3월 15일 오후 2시 남성',
+        );
+        return;
+      }
+    }
+
+    // 궁합 질문 감지 → 상대방 프로필 요청
+    if (isCompatibilityQuestion(utterance)) {
+      compatibilityPending.set(userId, { requestedAt: Date.now(), question: utterance });
+      await sendMessage(chatId, getPartnerProfileRequest(), { parseMode: 'Markdown' });
+      return;
+    }
+
+    // 7. DB 히스토리 로드 + 사용자 발화 저장
     const dbHistory = await getDbHistory('telegram', userId);
     const history = dbHistory.map((h) => ({
       role: h.role as 'user' | 'assistant',
@@ -535,7 +631,7 @@ async function handleMessage(
       console.error('[telegram] trackInterest error:', err),
     );
 
-    // 7. 분석 즉시 시작 + 중간 메시지 병렬 준비
+    // 8. 분석 즉시 시작 + 중간 메시지 병렬 준비
     const storedBirthProfile = {
       year: String(profile.birth_year),
       month: String(profile.birth_month),

@@ -325,7 +325,7 @@ function normalizePillar(rawValue: string): string {
   return `${stem}${branch}`;
 }
 
-async function calculateSajuFromAPI(profile: BirthProfile): Promise<SajuPillars> {
+export async function calculateSajuFromAPI(profile: BirthProfile): Promise<SajuPillars> {
   const params = new URLSearchParams({
     y: profile.year,
     m: profile.month,
