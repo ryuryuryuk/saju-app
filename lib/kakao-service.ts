@@ -1,6 +1,7 @@
 import OpenAI from 'openai';
 import { analyzeSajuStructure } from './saju-structure';
 import { analyzeSajuYukchin, formatYukchinString } from './yukchin';
+import { analyzeYearLuck, formatYearLuckText } from './saju-luck';
 import { getEmbedding } from './embeddings';
 import { supabase } from './supabase';
 import type { Turn } from './kakao-types';
@@ -130,6 +131,37 @@ async function generateNonSajuReply(
 }
 
 type Gender = '남성' | '여성';
+
+// 오행 시각화 차트 생성
+interface FiveElements {
+  목: number;
+  화: number;
+  토: number;
+  금: number;
+  수: number;
+}
+
+function buildFiveElementsChart(elements: FiveElements, saju: string): string {
+  const elementData = [
+    { name: '목', emoji: '🌳', value: elements.목, desc: 'Wood' },
+    { name: '화', emoji: '🔥', value: elements.화, desc: 'Fire' },
+    { name: '토', emoji: '🏔️', value: elements.토, desc: 'Earth' },
+    { name: '금', emoji: '⚔️', value: elements.금, desc: 'Metal' },
+    { name: '수', emoji: '💧', value: elements.수, desc: 'Water' },
+  ];
+
+  const maxValue = 8; // 총 8글자 (천간4 + 지지4)
+  const barLength = 8;
+
+  const bars = elementData.map(({ name, emoji, value }) => {
+    const filled = Math.round((value / maxValue) * barLength);
+    const empty = barLength - filled;
+    const bar = '█'.repeat(filled) + '░'.repeat(empty);
+    return `${emoji} ${name} ${bar} ${value}`;
+  });
+
+  return `*📊 오행 분포*\n\`\`\`\n${bars.join('\n')}\n\`\`\`\n사주: ${saju}\n`;
+}
 
 interface BirthProfile {
   year: string;
@@ -409,7 +441,13 @@ export async function generateFirstReading(profile: BirthProfile, displayName?: 
   }
 
   try {
-    const ragQuery = `사주 종합 분석 성격 직업 연애 재물`;
+    const now = new Date();
+    const seoulNow = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Seoul' }));
+    const currentYear = seoulNow.getFullYear();
+    const currentMonth = seoulNow.getMonth() + 1;
+
+    // 년운 키워드를 RAG 쿼리에 포함
+    const ragQuery = `사주 종합 분석 성격 연애 재물 년운 대운 오행 생극 충합`;
     const [saju, chunks] = await Promise.all([
       calculateSajuFromAPI(profile),
       retrieveClassicChunks(ragQuery),
@@ -420,12 +458,16 @@ export async function generateFirstReading(profile: BirthProfile, displayName?: 
     const yukchinText = formatYukchinString(yukchin);
     const ragText = buildRagText(chunks);
     const todayString = getSeoulDateString();
-    const todayYear = new Date().toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', year: 'numeric' });
+    const todayYear = `${currentYear}년`;
+
+    // 년운/월운 상호작용 분석
+    const yearLuck = analyzeYearLuck(saju, currentYear, currentMonth);
+    const yearLuckText = formatYearLuckText(yearLuck, saju.day[0]);
 
     const response = await client.chat.completions.create({
       model: MODEL,
       temperature: 0.75,
-      max_completion_tokens: 3000,
+      max_completion_tokens: 3500,
       messages: [
         {
           role: 'system',
@@ -434,76 +476,94 @@ export async function generateFirstReading(profile: BirthProfile, displayName?: 
 
 ## 현재 날짜
 오늘은 ${todayString}이다. 현재 연도는 ${todayYear}이다.
-${todayYear}은 병오(丙午)년 — 불(火)의 기운이 강한 해다.
 
-## ⚠️ 말투 (가장 중요 — 여기서 서비스 퀄리티가 결정된다)
-- 첫 분석은 **존댓말**로. 첫 만남이니까 예의 있게, 하지만 딱딱하지 않고 부드럽게.
-- **말투 일관성 필수**: 존댓말이면 처음부터 끝까지 존댓말. 한 문장도 반말로 끝내지 마.
+## ⚠️ 핵심: 년운 반영 (가장 중요한 분석 포인트)
+아래 [년운 분석 데이터]를 반드시 각 카테고리에 녹여서 풀이해라.
+단순히 "올해는 이런 해" 같은 일반론이 아니라, 사용자 원국(타고난 사주)과 올해 년운이 만나서
+*구체적으로 어떤 작용*이 일어나는지를 풀어야 한다.
+
+예시 (이런 수준의 구체성 필요):
+- "일간이 경금(金)인데 올해 병화(火)가 들어오면, 편관이 작용해요. 외부에서 압박이 오거나 갑자기 책임질 일이 생기는 구조예요."
+- "원국 시지에 자(子)가 있는데 년운 오(午)와 충이 걸려요. 시주는 자녀·미래·말년을 의미하니까, 올해 미래 계획이 한번 크게 흔들릴 수 있어요."
+- "년운 오미합(午未合)이 걸리면서 토 기운이 강해지는데, 이게 사주에서 재성이라 올해 재물 기회가 자연스럽게 열려요."
+
+일반론 금지. "올해 변화가 많아요" 같은 누구에게나 해당되는 말은 실패.
+
+## ⚠️ 말투
+- 첫 분석은 **존댓말**로. 첫 만남이니까 예의 있게, 부드럽지만 전문적으로.
+- **말투 일관성 필수**: 처음부터 끝까지 존댓말. 한 문장도 반말로 끝내지 마.
   - ⭕ "~이에요", "~거든요", "~해요", "~인데요", "~드릴게요"
-  - ❌ "~야", "~거든", "~해", "~이야" (존댓말 모드에서 갑자기 반말 섞기 금지)
-- 문장 끝이 매끄럽게 이어져야 해요. 읽다가 끊기면 실패예요.
-  - ⭕ "사주를 보면 원래 감정이 강한 타입이에요. 그래서 한 번 꽂히면 깊이 빠져드는데, 그게 장점이기도 하고 약점이기도 해요."
-  - ❌ "감정이 강한 타입이야. 그래서 깊이 빠져들어요. 이런 경우가 많습니다." (말투 뒤죽박죽)
-- "네 사주 구조를 보면~", "타고난 기운을 분석해보니까~" 같은 분석적 표현
-- 사주 용어를 *아주 조금만* 섞어서 전문성을 보여줘:
-  - 예: "일간이 ○○이라 기본적으로 △△ 기운을 타고났어"
-  - 예: "올해 병오년은 불의 기운이 강한 해인데, 네 사주랑 만나면..."
-  - 예: "재성(재물을 관장하는 기운)이 ○○ 위치에 있어서..."
-- 전문용어 쓸 때는 반드시 쉬운 설명을 바로 옆에 붙여줘. 용어만 던지지 마.
+  - ❌ "~야", "~거든", "~해", "~이야"
+- 문장 흐름이 매끄럽게 이어져야 해요. 끊기면 실패.
+- 사주 용어를 *조금씩* 섞되, 반드시 쉬운 설명을 바로 옆에 붙여:
+  - "편관(외부 압력을 뜻하는 기운)이 올해 강하게 들어오거든요"
+  - "재성(재물의 기운)이 활성화되는 구조예요"
 
 ## ⚠️ 타이틀 (맨 처음에 반드시)
-메시지 맨 위에 아래 형식으로 눈에 띄는 타이틀을 달아:
-"🔮 *${displayName ? `${displayName}님의` : '너의'} ${todayYear} 전반적인 흐름을 분석해봤어!*"
+메시지 맨 위에 아래 형식으로 타이틀을 달아:
+"🔮 *${displayName ? `${displayName}님의` : '회원님의'} ${todayYear} 전반적인 운의 흐름을 분석해봤어요!*"
 
-## 분석 구조 (이 순서대로, 이 소제목 그대로)
-1. *🧭 사주로 풀이한 네 성향* — 일간 특성 + 오행 균형 기반으로 구조적으로 분석. "이게 나야" 느낌.
-2. *💕 사랑* — 연애 스타일, 어떤 사람에게 끌리는지, 주의할 패턴
-3. *🤝 인간관계* — 사회적 성향, 친구/동료와의 관계 패턴, 강점과 약점
-4. *💰 재물* — 돈과의 관계, 재물 들어오는 구조, 조심할 습관
-5. *📋 총론* — ${todayYear} 올해 핵심 흐름 2-3줄 요약. 병오년 기운과 사용자 사주의 상호작용.
+## 분석 구조 (이 순서, 이 소제목 그대로)
+1. *🧭 사주로 풀이한 성향* — 일간 특성 + 오행 균형. "이게 나야" 느낌. 타고난 원국 분석.
+2. *💕 사랑* — 연애 스타일 + *올해 년운이 연애에 미치는 영향*. 충/합이 있으면 반드시 반영.
+3. *🤝 인간관계* — 사회적 성향 + *올해 인간관계에서 달라지는 것*. 년운 육친 작용 반영.
+4. *💰 재물* — 돈과의 관계 + *올해 재물운 흐름*. 재성/식상 년운 작용 반영.
+5. *📋 ${todayYear} 총론* — 올해 핵심 흐름 요약. 년운과 원국의 상호작용을 종합. 월운도 간단히 언급.
 
-## 분석 깊이 (가장 중요)
-- 각 카테고리에서 사주 구조를 근거로 분석해라. 뜬구름 잡는 일반론 금지.
-- "네 사주에서 ○○ 기운이 △△ 위치에 있어서..." 같은 구조적 근거를 제시해.
-- 사용자의 일간, 오행 강약, 육친 배치를 실제로 반영해서 맞춤 분석.
+각 카테고리에서 "올해는~" 으로 시작하는 시기 반영 문장이 최소 1-2개 있어야 함.
+
+## 분석 깊이
+- 원국(타고난 사주) 분석 + 년운(올해 흐름) 분석을 반드시 결합.
+- 충/합/형이 있으면 해당 기둥이 의미하는 영역(년주=조상/사회, 월주=부모/직업, 일주=배우자/나, 시주=자녀/미래)과 연결해서 풀이.
+- 년운 육친(편관/정재/식신 등)이 올해 어떤 에너지를 가져오는지 구체적으로 설명.
 - 고서 내용은 네 말로 자연스럽게 녹여서 풀이. 고서 제목 언급 금지.
 
 ## GPT 티 빼기
-"~할 수 있어", "~라고 볼 수 있어" 금지. 자연스러운 연결어 사용. 문장 길이 다양하게.
+"~할 수 있어", "~라고 볼 수 있어" 금지. 단정적으로.
 
 ## 포맷
-- *볼드*로 핵심 포인트 강조
-- 카테고리 사이 줄바꿈으로 가독성 확보
-- 전체 1500자 이내
+- *볼드*로 핵심 포인트 강조 (Telegram: *텍스트*)
+- 카테고리 사이 줄바꿈
+- 전체 1800자 이내
+- ⚠️ ### 이나 ## 마크다운 헤더 절대 금지. 소제목은 *볼드*만.
 
 ## 금지
 - "~일 수도", "~할 수 있어" 같은 불확실 표현
 - 과한 공감/애교
-- 고서 제목 직접 언급`,
+- 고서 제목 직접 언급
+- ### ## 마크다운 헤더
+- 누구에게나 해당되는 일반론`,
         },
         {
           role: 'user',
-          content: `[사용자 정보]
+          content: `[사용자 원국 정보]
 ${profile.year}년 ${profile.month}월 ${profile.day}일 ${profile.hour}시생, ${profile.gender}
-사주 사주: ${saju.fullString}
-일간: ${structure.dayMaster.element}, 강약: ${structure.dayMaster.strength.label}
+사주: ${saju.fullString}
+일간: ${structure.dayMaster.stem}(${structure.dayMaster.element}), 강약: ${structure.dayMaster.strength.label} (점수: ${structure.dayMaster.strength.score})
 오행 분포: ${JSON.stringify(structure.fiveElements)}
+월지 계절: ${structure.monthSupport.season} (${structure.monthSupport.climate})
 육친 배치: ${yukchinText}
+
+${yearLuckText}
 
 [고서 참고 — 내부용, 절대 제목 언급 금지]
 ${ragText}
 
 ---
-이 사람의 사주를 구조적으로, 전문가답게 분석해줘.
+이 사람의 사주를 원국 + 년운 결합해서 구조적으로 분석해줘.
 타이틀 → 성향 → 사랑 → 인간관계 → 재물 → 총론 순서.
-각 카테고리에서 사주 구조를 근거로 들면서 분석해.
-전문용어 살짝 + 바로 쉬운 설명.
-1500자 이내. 디테일하되 핵심만.`.trim(),
+각 카테고리마다 (1) 원국 기반 분석 + (2) 올해 년운이 미치는 영향을 둘 다 포함해.
+충/합/형이 있으면 반드시 해당 영역과 연결해서 풀어.
+전문용어 살짝 + 바로 쉬운 설명. 1800자 이내.`.trim(),
         },
       ],
     });
 
-    return response.choices?.[0]?.message?.content?.trim() ?? '분석 결과를 생성하지 못했습니다.';
+    const llmResponse = response.choices?.[0]?.message?.content?.trim() ?? '분석 결과를 생성하지 못했습니다.';
+
+    // 오행 차트를 LLM 응답 앞에 추가
+    const chart = buildFiveElementsChart(structure.fiveElements as FiveElements, saju.fullString);
+    return `${chart}\n${llmResponse}`;
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : '알 수 없는 오류';
     return `분석 중 오류가 발생했습니다: ${message}`;
@@ -576,7 +636,13 @@ export async function generateReply(
     const prior = formatHistory(history);
 
     const todayString = getSeoulDateString();
-    const todayYear = new Date().toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', year: 'numeric' });
+    const now = new Date();
+    const seoulNow = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Seoul' }));
+    const todayYear = `${seoulNow.getFullYear()}년`;
+
+    // 년운/월운 분석
+    const yearLuck = analyzeYearLuck(saju, seoulNow.getFullYear(), seoulNow.getMonth() + 1);
+    const yearLuckText = formatYearLuckText(yearLuck, saju.day[0]);
 
     const response = await client.chat.completions.create({
       model: MODEL,
@@ -660,8 +726,11 @@ export async function generateReply(
 [사용자 정보]
 ${safeProfile.year}년 ${safeProfile.month}월 ${safeProfile.day}일 ${safeProfile.hour}시생, ${safeProfile.gender}
 사주: ${saju.fullString}
-일간 특성: ${structure.dayMaster.element}, 강약 ${structure.dayMaster.strength.label}
+일간 특성: ${structure.dayMaster.stem}(${structure.dayMaster.element}), 강약 ${structure.dayMaster.strength.label}
+오행 분포: ${JSON.stringify(structure.fiveElements)}
 육친 배치: ${yukchinText}
+
+${yearLuckText}
 
 [고서 참고 — 내부용]
 ${ragText}

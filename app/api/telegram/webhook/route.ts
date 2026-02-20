@@ -493,9 +493,10 @@ async function handleMessage(
         clearInterval(progressInterval);
         if (progressMsgId) await deleteMessage(chatId, progressMsgId).catch(() => {});
 
-        // 첫 분석 결과 발송
-        await addDbTurn('telegram', userId, 'assistant', firstReading);
-        await sendMessage(chatId, firstReading);
+        // 첫 분석 결과 발송 — Telegram에서 ### 마크다운 헤더 깨짐 방지
+        const cleanedReading = firstReading.replace(/^#{1,6}\s*/gm, '');
+        await addDbTurn('telegram', userId, 'assistant', cleanedReading);
+        await sendMessage(chatId, cleanedReading);
 
         // 후속 질문 유도
         await sendMessage(
@@ -594,6 +595,8 @@ async function handleMessage(
     }
 
     // 9. 답변 저장 (full) + 블러 처리 후 발송
+    // Telegram에서 ### 마크다운 헤더 깨짐 방지
+    reply = reply.replace(/^#{1,6}\s*/gm, '');
     await addDbTurn('telegram', userId, 'assistant', reply);
     addTurn(userId, 'assistant', reply);
 
