@@ -80,7 +80,7 @@ const COMPAT_PROGRESS_STAGES = [
   { pct: 95, label: '거의 다 됐어 💕' },
 ];
 
-const PROGRESS_INTERVAL_MS = 1500;
+const PROGRESS_INTERVAL_MS = 2000;
 
 function buildProgressBar(pct: number): string {
   const filled = Math.round(pct / 10);
@@ -605,8 +605,27 @@ async function handleMessage(
             await deleteMessage(chatId, progressMsgId).catch(() => {});
           }
 
-          // 궁합 결과 발송 (시각 차트가 맨 위에 있음)
-          await sendMessage(chatId, result, { parseMode: 'Markdown' });
+          // FREE/PREMIUM 파싱 및 발송
+          const parsed = parseFreemiumSections(result);
+          if (parsed.hasPremium) {
+            const blurred = blurText(parsed.premiumText);
+            const displayText =
+              parsed.freeText +
+              '\n\n🔒 *더 솔직한 이야기*\n' +
+              blurred +
+              '\n\n_침대 궁합, 숨겨진 문제, 결혼 전망..._';
+
+            await sendMessage(chatId, displayText, {
+              parseMode: 'Markdown',
+              replyMarkup: {
+                inline_keyboard: [
+                  [{ text: '🔥 19금 궁합 보기', callback_data: 'premium_unlock' }],
+                ],
+              },
+            });
+          } else {
+            await sendMessage(chatId, result, { parseMode: 'Markdown' });
+          }
 
           // DB에 저장
           await addDbTurn('telegram', userId, 'user', `궁합 질문: ${pendingCompat.question}`);
