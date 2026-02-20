@@ -70,6 +70,16 @@ const PROGRESS_STAGES = [
   { pct: 90, label: '거의 다 됐어' },
 ];
 
+const COMPAT_PROGRESS_STAGES = [
+  { pct: 10, label: '두 사람 사주 계산 중' },
+  { pct: 25, label: '일간 관계 분석 중' },
+  { pct: 40, label: '지지 충합 확인 중' },
+  { pct: 55, label: '오행 보완 분석 중' },
+  { pct: 70, label: '궁합 점수 계산 중' },
+  { pct: 85, label: '관계 풀이 작성 중' },
+  { pct: 95, label: '거의 다 됐어 💕' },
+];
+
 const PROGRESS_INTERVAL_MS = 1500;
 
 function buildProgressBar(pct: number): string {
@@ -535,8 +545,28 @@ async function handleMessage(
       const partnerParsed = extractAndValidateProfile(utterance);
       if (partnerParsed) {
         compatibilityPending.delete(userId);
-        await sendMessage(chatId, '💕 *궁합 분석 중...*', { parseMode: 'Markdown' });
-        await sendChatAction(chatId);
+
+        // 진행률 표시 시작
+        const compatHeader = '💕 *궁합 분석 중...*';
+        const progressResult = await sendMessage(
+          chatId,
+          buildProgressText(compatHeader, 0, '시작'),
+          { parseMode: 'Markdown' },
+        );
+        const progressMsgId = progressResult.messageId;
+
+        let compatStep = 0;
+        const compatProgressInterval = setInterval(() => {
+          if (compatStep < COMPAT_PROGRESS_STAGES.length && progressMsgId) {
+            const stage = COMPAT_PROGRESS_STAGES[compatStep];
+            editMessageText(
+              chatId,
+              progressMsgId,
+              buildProgressText(compatHeader, stage.pct, stage.label),
+            ).catch(() => {});
+            compatStep++;
+          }
+        }, PROGRESS_INTERVAL_MS);
 
         const myProfile = {
           year: String(profile.birth_year),
@@ -569,6 +599,12 @@ async function handleMessage(
             pendingCompat.question,
           );
 
+          // 진행률 정리
+          clearInterval(compatProgressInterval);
+          if (progressMsgId) {
+            await deleteMessage(chatId, progressMsgId).catch(() => {});
+          }
+
           // FREE/PREMIUM 파싱 및 발송
           const parsed = parseFreemiumSections(result);
           if (parsed.hasPremium) {
@@ -595,6 +631,10 @@ async function handleMessage(
           await addDbTurn('telegram', userId, 'user', `궁합 질문: ${pendingCompat.question}`);
           await addDbTurn('telegram', userId, 'assistant', result);
         } catch (err) {
+          clearInterval(compatProgressInterval);
+          if (progressMsgId) {
+            await deleteMessage(chatId, progressMsgId).catch(() => {});
+          }
           console.error('[telegram] compatibility analysis error:', err);
           await sendMessage(chatId, '궁합 분석 중 오류가 발생했어요. 다시 시도해주세요!');
         }
