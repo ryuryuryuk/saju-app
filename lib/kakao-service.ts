@@ -8,6 +8,127 @@ import type { Turn } from './kakao-types';
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const MODEL = process.env.OPENAI_MODEL || 'gpt-4.1';
 
+// 메시지 유형 분류
+type MessageType = 'saju_question' | 'casual_chat' | 'meta_question' | 'harmful_request' | 'greeting';
+
+function classifyMessage(text: string): MessageType {
+  const lower = text.toLowerCase().trim();
+
+  // 1. 위험/유해 요청 감지
+  const harmfulPatterns = [
+    /자살|자해|죽고\s?싶|죽는\s?방법|목숨|극단적/,
+    /마약|필로폰|대마|코카인|약물/,
+    /폭발물|폭탄|총기|살인|살해/,
+    /해킹|계좌\s?털기|보이스\s?피싱/,
+  ];
+  if (harmfulPatterns.some(p => p.test(text))) {
+    return 'harmful_request';
+  }
+
+  // 2. 메타 질문 (AI/분석 자체에 대한 질문)
+  const metaPatterns = [
+    /왜\s*(이렇게|그렇게)\s*(분석|말|얘기|대답)/,
+    /어떻게\s*알아|어떻게\s*분석/,
+    /뭘\s*보고\s*(판단|분석)/,
+    /네가\s*(뭔데|누군데|어떻게)/,
+    /ai\s*(맞|아니|인가)/i,
+    /gpt\s*(맞|아니|인가)/i,
+    /사람이야|로봇이야|봇이야/,
+    /근거가\s*뭐|출처가\s*뭐/,
+  ];
+  if (metaPatterns.some(p => p.test(text))) {
+    return 'meta_question';
+  }
+
+  // 3. 인사/가벼운 대화
+  const greetingPatterns = [
+    /^(안녕|하이|헬로|ㅎㅇ|hi|hello)/i,
+    /^(반가워|만나서\s*반가)/,
+    /^(잘\s*있어|잘\s*지내)/,
+  ];
+  if (greetingPatterns.some(p => p.test(text))) {
+    return 'greeting';
+  }
+
+  // 4. 캐주얼/무의미 메시지
+  const casualPatterns = [
+    /^[ㅋㅎㅠㅜㄷㄱㅂㅅㅈ]+$/,  // ㅋㅋㅋ, ㅎㅎㅎ 등
+    /^[ㅋㅎ]{2,}$/,
+    /^(ㅇㅋ|ㅇㅇ|ㄴㄴ|ㄱㄱ|ㅇㅎ|ㅂㅂ)$/,
+    /^(오키|오케이|ㅇㅋㅇㅋ|굿|좋아|알겠어|그래|응|어|음|헐|와|대박|실화|ㄹㅇ|진짜|레알)/,
+    /^\.+$/,
+    /^\?+$/,
+    /^!+$/,
+    /^(뭐|뭔|모야|뭐야)\??$/,
+    /^테스트/,
+  ];
+  if (casualPatterns.some(p => p.test(lower)) || text.length <= 3) {
+    // 짧은 메시지 중 사주 키워드가 있으면 사주 질문으로
+    const sajuKeywords = /운세|사주|궁합|재물|연애|취업|이직|결혼|건강|운|올해|내년|이번\s*달/;
+    if (sajuKeywords.test(text)) {
+      return 'saju_question';
+    }
+    return 'casual_chat';
+  }
+
+  // 5. 기본값: 사주 관련 질문
+  return 'saju_question';
+}
+
+// 비사주 메시지에 대한 응답 생성
+async function generateNonSajuReply(
+  messageType: MessageType,
+  utterance: string,
+  history: Turn[],
+): Promise<string> {
+  // 유해 요청
+  if (messageType === 'harmful_request') {
+    return '그런 이야기는 내가 도와줄 수 없어. 혹시 힘든 일 있어? 전문 상담이 필요하면 자살예방상담전화 1393, 정신건강위기상담전화 1577-0199로 연락해봐. 💙';
+  }
+
+  // 메타 질문
+  if (messageType === 'meta_question') {
+    const metaPrompt = `사용자가 AI/분석 방식에 대해 물었어. 짧고 자연스럽게 대답해.
+- "나는 사주 전문가 AI야" 라고 솔직히
+- 사주 분석은 사주팔자 + 고서 지식 기반이라고 간단히
+- 궁금한 거 있으면 사주 관련해서 편하게 물어보라고
+- 3문장 이내, 친근하게
+
+사용자: "${utterance}"`;
+
+    const response = await client.chat.completions.create({
+      model: MODEL,
+      temperature: 0.7,
+      max_completion_tokens: 200,
+      messages: [{ role: 'user', content: metaPrompt }],
+    });
+    return response.choices?.[0]?.message?.content?.trim() ?? '나는 사주 분석 AI야. 사주 관련해서 궁금한 거 물어봐!';
+  }
+
+  // 인사
+  if (messageType === 'greeting') {
+    const greetings = [
+      '안녕! 사주 봐줄까? 생년월일시 알려줘 😊',
+      '반가워! 오늘 운세나 궁금한 거 있어?',
+      '안녕~ 사주 상담 원하면 생년월일시랑 성별 알려줘!',
+    ];
+    return greetings[Math.floor(Math.random() * greetings.length)];
+  }
+
+  // 캐주얼 대화
+  if (messageType === 'casual_chat') {
+    const recentContext = history.slice(-3).map(t => t.content).join(' ');
+    const hasSajuContext = /운세|사주|재물|연애|취업|결혼/.test(recentContext);
+
+    if (hasSajuContext) {
+      return 'ㅋㅋ 더 궁금한 거 있어? 아니면 다른 주제로 사주 봐줄까?';
+    }
+    return '뭔가 궁금한 거 있어? 사주 관련이면 편하게 물어봐!';
+  }
+
+  return '사주 관련해서 궁금한 거 있으면 물어봐!';
+}
+
 type Gender = '남성' | '여성';
 
 interface BirthProfile {
@@ -282,6 +403,93 @@ export function extractAndValidateProfile(text: string): BirthProfile | null {
   return validateProfile(partial);
 }
 
+export async function generateFirstReading(profile: BirthProfile): Promise<string> {
+  if (!process.env.OPENAI_API_KEY) {
+    return '현재 AI 분석 키 설정이 없어 답변을 생성할 수 없습니다.';
+  }
+
+  try {
+    const ragQuery = `사주 종합 분석 성격 직업 연애 재물`;
+    const [saju, chunks] = await Promise.all([
+      calculateSajuFromAPI(profile),
+      retrieveClassicChunks(ragQuery),
+    ]);
+
+    const structure = analyzeSajuStructure(saju);
+    const yukchin = analyzeSajuYukchin(saju);
+    const yukchinText = formatYukchinString(yukchin);
+    const ragText = buildRagText(chunks);
+    const todayString = getSeoulDateString();
+    const todayYear = new Date().toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', year: 'numeric' });
+
+    const response = await client.chat.completions.create({
+      model: MODEL,
+      temperature: 0.75,
+      max_completion_tokens: 2500,
+      messages: [
+        {
+          role: 'system',
+          content: `너는 경력 20년 사주 전문가야. 첫 만남에서 사용자의 사주를 종합적으로 읽어주는 역할이야.
+이건 무료 첫 분석이고, 사용자가 "와 이거 진짜 내 얘기다" 하면서 감탄하게 만들어야 해.
+
+## 현재 날짜
+오늘은 ${todayString}이다. 현재 연도는 ${todayYear}이다.
+
+## 말투
+- 편하게 반말로. 첫 만남이니까 친근하게.
+- "네 사주를 보면~", "타고난 걸 보니까~" 같은 전문가 표현
+- 전문용어 쓰지 마. 쉽게.
+
+## 분석 구조 (이 순서대로)
+1. *타고난 성격* — 일간 특성 기반, "아 이게 나야" 싶을 정도로 구체적으로
+2. *직업/커리어* — 어떤 일이 맞는 타입인지
+3. *연애/대인관계* — 사랑 스타일, 주의점
+4. *재물운* — 돈과의 관계, 습관
+5. *${todayYear} 올해 흐름* — 올해 핵심 키워드 1-2개
+
+## 고서 활용
+고서 내용은 네 말로 자연스럽게 녹여서. 인용이나 고서 제목 금지.
+
+## GPT 티 빼기
+"~할 수 있어", "~라고 볼 수 있어" 금지. 자연스러운 연결어 사용. 문장 길이 다양하게.
+
+## 포맷
+- 각 영역은 이모지 소제목으로 구분 (🔥 성격, 💼 커리어, 💕 연애, 💰 재물, 📅 올해)
+- *볼드*로 핵심 포인트 강조
+- 전체 1200자 이내
+
+## 금지
+- 사주 전문용어
+- "~일 수도", "~할 수 있어" 같은 불확실 표현
+- 과한 공감/애교`,
+        },
+        {
+          role: 'user',
+          content: `[사용자 정보]
+${profile.year}년 ${profile.month}월 ${profile.day}일 ${profile.hour}시생, ${profile.gender}
+사주: ${saju.fullString}
+일간 특성: ${structure.dayMaster.element}, 강약 ${structure.dayMaster.strength.label}
+육친 배치: ${yukchinText}
+
+[고서 참고 — 내부용]
+${ragText}
+
+---
+이 사람의 사주를 종합적으로 읽어줘. 첫 분석이니까 감탄하게 만들어.
+"아 이 사람 내 사주 진짜 제대로 봤다" 소리 나오게.
+
+1200자 이내. 각 영역 짧고 강하게.`.trim(),
+        },
+      ],
+    });
+
+    return response.choices?.[0]?.message?.content?.trim() ?? '분석 결과를 생성하지 못했습니다.';
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : '알 수 없는 오류';
+    return `분석 중 오류가 발생했습니다: ${message}`;
+  }
+}
+
 export async function generateReply(
   utterance: string,
   history: Turn[],
@@ -294,6 +502,12 @@ export async function generateReply(
 
   if (!process.env.OPENAI_API_KEY) {
     return '현재 AI 분석 키 설정이 없어 답변을 생성할 수 없습니다. 관리자에게 OPENAI_API_KEY 설정을 요청해 주세요.';
+  }
+
+  // 메시지 유형 분류 — 사주 질문이 아니면 다르게 응답
+  const messageType = classifyMessage(cleanUtterance);
+  if (messageType !== 'saju_question') {
+    return generateNonSajuReply(messageType, cleanUtterance, history);
   }
 
   // storedProfile이 있으면 DB에서 가져온 프로필 우선 사용
@@ -346,82 +560,65 @@ export async function generateReply(
 
     const response = await client.chat.completions.create({
       model: MODEL,
-      temperature: 0.85,
-      max_completion_tokens: 2000,
+      temperature: 0.75,
+      max_completion_tokens: 1200,
       messages: [
         {
           role: 'system',
-          content: `너는 사주 전문가야. 말은 편하게 하는데 전문가로서 신뢰감은 있어.
+          content: `너는 경력 20년 사주 전문가야. 짧고 강하게. 한 문장도 허투루 쓰지 마.
 
 ## ⚠️ 현재 날짜 (최우선 규칙)
 오늘은 ${todayString}이다. 현재 연도는 ${todayYear}이다.
 - "올해" = ${todayYear}. 절대로 2024년이나 2025년이 아니다.
 - "이번 달" = 이 날짜의 월이다.
-- 이 날짜를 무시하거나 다른 연도를 사용하면 안 된다. 반드시 이 날짜 기준으로 답해라.
 
 ## 말투 (핵심)
 - 사용자의 말투를 따라가라. 사용자가 "~요" 존댓말이면 너도 존댓말, 사용자가 반말이면 너도 반말.
-- 존댓말 예시: "사주를 보니까요, ~한 흐름이에요", "이 부분은 조심하셔야 해요"
-- 반말 예시: "네 사주를 보면~", "타고난 걸 보니까~"
 - 사용자의 톤과 에너지를 미러링해서 친근감을 줘라. 맞춤형 서비스니까.
 - 설명은 쉽게. 전문용어 쓰지 마.
 
-## 고서 활용 (간단하게만)
-[고서 참고] 내용은 참고만 해. 직접 인용하거나 가르치듯 설명하지 마.
+## ⚠️ 답변 구조 (반드시 지켜라)
+답변을 [FREE]와 [PREMIUM] 두 섹션으로 나눠서 작성해라.
 
-❌ 이렇게 하지 마:
-- "옛날 책에 이런 말이 있어", "고서에서는~", "자평진전에 따르면~"
-- 고서 제목 언급 금지
-- 교과서처럼 가르치는 말투
+[FREE]
+- 사용자 질문에 대한 전반적 분석 (성향, 흐름, 분위기)
+- 감탄하게 만드는 맞춤 분석 — "와 이게 나야" 느낌
+- 여기서 호기심을 끌어올려라. 핵심 답변은 아직 안 줌.
 
-⭕ 이렇게 해:
-- 고서 내용을 네 말로 자연스럽게 녹여서 풀이
-- "이런 타입은~", "이런 기운이 있으면~" 처럼 그냥 설명
-- 디테일한 풀이에 집중
+[PREMIUM]
+- 질문의 핵심 답: 구체적 시기, 타이밍, 핵심 조언
+- 가장 궁금해하는 부분을 여기에 넣어라
+- "근데 진짜 중요한 건..." 식으로 시작
 
+반드시 [FREE] 태그와 [PREMIUM] 태그로 감싸서 출력해라.
 예시:
-"돈 쪽으로 신경 많이 쓰는 타입이야. 그래서 재물 문제가 생기면 다른 사람보다 더 불안해지기 쉬워."
-(← 고서 내용을 인용 없이 자연스럽게 풀어서 설명)
+[FREE]네 사주를 보면 원래 신중한 타입이야... (분석)[/FREE]
+[PREMIUM]근데 진짜 중요한 건, *3월 중순* 전에 움직여야 해... (핵심 답)[/PREMIUM]
+
+## 고서 활용
+고서 내용을 네 말로 자연스럽게 녹여서 풀이. 인용이나 고서 제목 금지.
 
 ## GPT 티 빼기
-❌ 이런 말투 쓰지 마:
-- "~하는 게 좋겠어", "~할 수 있어", "~라고 볼 수 있어"
-- 모든 문장 비슷한 길이, 너무 정돈된 느낌
-
-⭕ 자연스럽게:
-- "근데 이게", "솔직히", "사실" 같은 연결어
+- "~할 수 있어", "~라고 볼 수 있어" 금지
+- "근데 이게", "솔직히", "사실" 같은 자연스러운 연결어
 - 문장 길이 다양하게
-- 딱딱하지 않게
 
 ## 공감은 짧게
 - "고민되지" 한마디면 끝. 바로 본론.
-- "나도 그랬어" 같은 가짜 경험 금지
 
 ## 이모지
-- 2-3개. 포인트에만.
-- 💪💰💕 정도.
+- 2-3개. 포인트에만. 💪💰💕
 
 ## 날짜/시기
-- 사용자가 날짜, 요일, 시기를 구체적으로 물어보면 위의 현재 날짜 기준으로 정확하게 답해라. 틀리면 안 된다.
-- 사용자가 시기를 안 물어봤으면 굳이 시기를 끼워넣지 마. 분석 내용에 집중해라.
-- 시기를 언급할 때는 "*3월 중순*", "*이번 주 후반*" 이렇게 구체적으로. "언젠가", "조만간" 금지.
+- 시기를 물어봤으면 현재 날짜 기준으로 구체적으로. "*3월 중순*", "*이번 주 후반*"
+- 시기를 안 물어봤으면 굳이 시기를 끼워넣지 마.
 
 ## 텔레그램 포맷팅
 - *볼드*: 핵심, 시기
 - _이탤릭_: 조건, 주의
 
-## 예시
-"네 사주를 보면 원래 신중한 타입이야. 옛날 책에 *'인성이 강하면 결단이 늦다'*는 말이 있거든. 쉽게 말하면 생각이 많아서 행동이 느려질 수 있다는 건데, 딱 너야.
-
-근데 *올해는 조금 다르게 가는 게 나아*. 너무 생각만 하면 오히려 타이밍 놓쳐.
-
-*3월 중순 전에* 움직여봐. 감정적으로 하지 말고 차분하게 💪"
-
 ## 금지
-- 사주 전문용어
-- GPT스러운 정형화된 문장
-- 과한 공감/애교
-- 너무 과격하거나 자극적인 표현`,
+- 사주 전문용어, GPT스러운 정형화된 문장, 과한 공감/애교`,
         },
         {
           role: 'user',
@@ -444,14 +641,8 @@ ${prior}
 
 ---
 전문가로서 권위 있게, 근데 말은 편하게 답변해.
-
-필수:
-1. "네 사주를 보면~" 전문가 표현
-2. [고서 참고]에서 관련 내용 1개 짧게 인용 + 쉬운 풀이 ("쉽게 말하면~")
-3. *볼드*로 핵심 답변 강조
-4. 이모지 2-3개만
-5. 확신 있는 톤 — "~일 수도" 금지
-
+반드시 [FREE]...[/FREE] 와 [PREMIUM]...[/PREMIUM] 태그로 나눠서 써.
+FREE는 감탄하게, PREMIUM은 핵심 답변.
 800자 이내.`.trim(),
         },
       ],
