@@ -322,19 +322,54 @@ async function handleCallbackQuery(query: TelegramCallbackQuery): Promise<void> 
       case 'premium_unlock': {
         await answerCallbackQuery(callbackId);
         const premium = await isPremiumUser('telegram', userId);
+        const dbHist = await getDbHistory('telegram', userId);
+        const lastAssistant = [...dbHist].reverse().find((h) => h.role === 'assistant');
+        const lastUser = [...dbHist].reverse().find((h) => h.role === 'user');
+
+        // 궁합 분석인지 확인
+        const isCompatibility = lastAssistant?.content?.includes('궁합 분석') ||
+                                lastAssistant?.content?.includes('💕 궁합') ||
+                                lastUser?.content?.includes('궁합');
 
         if (premium) {
           // 유료 사용자 → DB에서 마지막 어시스턴트 답변 full 버전 발송
-          const dbHist = await getDbHistory('telegram', userId);
-          const lastAssistant = [...dbHist].reverse().find((h) => h.role === 'assistant');
           if (lastAssistant) {
             const fullText = cleanTags(lastAssistant.content);
             await sendMessage(chatId, `🔓 *전체 풀이*\n\n${fullText}`, { parseMode: 'Markdown' });
           } else {
             await sendMessage(chatId, '이전 분석 내역을 찾을 수 없습니다. 질문을 다시 보내주세요!');
           }
+        } else if (isCompatibility) {
+          // 궁합 분석 → 19금 맞춤 전환 메시지
+          await sendMessage(
+            chatId,
+            '*솔직히 말해도 돼?* 🔥\n\n' +
+              '아까 분석하면서 *침대 궁합*도 봤거든.\n' +
+              '이건 좀... 민감해서 블러 처리했어.\n\n' +
+              '근데 네가 궁금해하는 거,\n' +
+              '결국 *몸이 맞는지*랑 *오래갈 수 있는지*잖아.\n\n' +
+              '블러 안에 있는 거:\n' +
+              '→ *🔥 침대에서 둘이 어떤지* (노골적)\n' +
+              '→ *💣 이 관계 터질 수 있는 지점*\n' +
+              '→ *💍 결혼하면 어떻게 되는지*\n' +
+              '→ *🎯 이 사람 꽉 잡는 법*\n\n' +
+              '솔직히, 사귀기 전에 이거 모르면\n' +
+              '나중에 후회할 수도 있어.\n\n' +
+              '💎 *1,900원* — 19금 궁합 전체\n' +
+              '💎 *9,900원/월* — 무제한 상담',
+            {
+              parseMode: 'Markdown',
+              replyMarkup: {
+                inline_keyboard: [
+                  [{ text: '🔥 19금 궁합 열기', callback_data: 'premium_once' }],
+                  [{ text: '💎 무제한 상담', callback_data: 'premium_monthly' }],
+                  [{ text: '괜찮아, 담에', callback_data: 'premium_skip_compat' }],
+                ],
+              },
+            },
+          );
         } else {
-          // 무료 사용자 → 결제 안내
+          // 일반 사주 분석 → 기존 전환 메시지
           await sendMessage(
             chatId,
             '*아까 분석에서 시기가 나왔어*\n\n' +
@@ -352,12 +387,8 @@ async function handleCallbackQuery(query: TelegramCallbackQuery): Promise<void> 
               parseMode: 'Markdown',
               replyMarkup: {
                 inline_keyboard: [
-                  [
-                    { text: '⚡ 핵심 답변 열기', callback_data: 'premium_once' },
-                  ],
-                  [
-                    { text: '🔥 무제한 상담', callback_data: 'premium_monthly' },
-                  ],
+                  [{ text: '⚡ 핵심 답변 열기', callback_data: 'premium_once' }],
+                  [{ text: '🔥 무제한 상담', callback_data: 'premium_monthly' }],
                   [{ text: '괜찮아, 담에', callback_data: 'premium_skip_chat' }],
                 ],
               },
@@ -377,6 +408,20 @@ async function handleCallbackQuery(query: TelegramCallbackQuery): Promise<void> 
             '네가 지금 결정 못 내리고 있는 거랑 딱 맞물려 있거든.\n\n' +
             '나중에 "그때 그거 뭐였지?" 싶으면 다시 물어봐.\n' +
             '그때까지 기운이 안 바뀌었으면 좋겠는데 🔮',
+        );
+        break;
+      }
+
+      case 'premium_skip_compat': {
+        await answerCallbackQuery(callbackId);
+        await sendMessage(
+          chatId,
+          '알겠어.\n\n' +
+            '근데 아까 본 그 *침대 궁합*...\n' +
+            '솔직히 좀 의외였거든. 🔥\n\n' +
+            '나중에 "그때 뭐라고 했더라?" 싶으면\n' +
+            '다시 궁합 물어봐. 그때도 말해줄게.\n\n' +
+            '이 사람이랑 잘 됐으면 좋겠다 💕',
         );
         break;
       }
