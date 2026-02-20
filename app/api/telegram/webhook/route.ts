@@ -319,27 +319,26 @@ async function handleCallbackQuery(query: TelegramCallbackQuery): Promise<void> 
           // 무료 사용자 → 결제 안내
           await sendMessage(
             chatId,
-            '*지금 이 타이밍에 봐야 해*\n\n' +
-              '솔직히 말하면,\n' +
-              '방금 분석에서 *시기*가 나왔어.\n' +
-              '이거 놓치면 다음 기회가 언제인지 몰라.\n\n' +
-              '블러 친 부분에 있는 내용:\n' +
-              '→ *정확한 타이밍* (월/주 단위)\n' +
-              '→ *피해야 할 시기*\n' +
-              '→ *지금 당장 해야 할 것*\n\n' +
-              '커피 한 잔 값이야.\n' +
-              '근데 타이밍 놓치면 커피값보다 훨씬 크게 후회할걸?\n\n' +
-              '💎 *1,900원* — 이 질문 핵심 답변\n' +
+            '*아까 분석에서 시기가 나왔어*\n\n' +
+              '네가 지금 고민하는 그거,\n' +
+              '언제 움직여야 하는지 *정확한 타이밍*이 보여.\n\n' +
+              '근데 이 시기가 생각보다 빨라.\n' +
+              '모르고 넘어가면... 나중에 "그때 왜 안 봤지" 할 수도.\n\n' +
+              '블러 안에 있는 거:\n' +
+              '→ *움직여야 할 정확한 시점*\n' +
+              '→ *절대 피해야 할 날*\n' +
+              '→ *지금 당장 해야 할 한 가지*\n\n' +
+              '💎 *1,900원* — 이 질문의 핵심 답\n' +
               '💎 *9,900원/월* — 무제한 상담',
             {
               parseMode: 'Markdown',
               replyMarkup: {
                 inline_keyboard: [
                   [
-                    { text: '⚡ 지금 열기 1,900원', callback_data: 'premium_once' },
+                    { text: '⚡ 핵심 답변 열기', callback_data: 'premium_once' },
                   ],
                   [
-                    { text: '🔥 무제한 9,900원/월', callback_data: 'premium_monthly' },
+                    { text: '🔥 무제한 상담', callback_data: 'premium_monthly' },
                   ],
                   [{ text: '괜찮아, 담에', callback_data: 'premium_skip_chat' }],
                 ],
@@ -355,8 +354,11 @@ async function handleCallbackQuery(query: TelegramCallbackQuery): Promise<void> 
         await sendMessage(
           chatId,
           '알겠어.\n\n' +
-            '근데 아까 그 시기... 계속 신경 쓰이면 언제든 다시 물어봐.\n' +
-            '사주는 타이밍이 전부거든 🔮',
+            '근데 솔직히,\n' +
+            '아까 분석하면서 본 그 *타이밍*...\n' +
+            '네가 지금 결정 못 내리고 있는 거랑 딱 맞물려 있거든.\n\n' +
+            '나중에 "그때 그거 뭐였지?" 싶으면 다시 물어봐.\n' +
+            '그때까지 기운이 안 바뀌었으면 좋겠는데 🔮',
         );
         break;
       }
