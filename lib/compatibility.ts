@@ -276,7 +276,7 @@ export async function generateCompatibilityAnalysis(
   const response = await client.chat.completions.create({
     model: MODEL,
     temperature: 0.75,
-    max_completion_tokens: 1500,
+    max_completion_tokens: 1200,
     messages: [
       {
         role: 'system',
@@ -287,31 +287,25 @@ export async function generateCompatibilityAnalysis(
 - 친근하지만 전문가 느낌
 - GPT 티 안 나게
 
-## 답변 구조 (반드시)
-[FREE]
-- 두 사람의 기본 케미 분석
-- 궁합 유형이 뭔지 (${compatType.emoji} ${compatType.type})
-- 서로 끌리는 포인트
-- "근데 이 관계에서 진짜 조심해야 할 게 있어..." 로 끊기
-
-[PREMIUM]
-- 구체적 주의 사항
-- 충돌 시기 / 좋은 시기
-- 장기 전망 (결혼하면 어떨지)
-- 상대 다루는 법 핵심 1가지
+## 답변 구조
+1. *케미 분석* — 두 사람이 만나면 어떤 에너지가 생기는지
+2. *끌림 포인트* — 서로 어디에 끌리는지
+3. *주의할 점* — 이 관계에서 조심해야 할 것
+4. *장기 전망* — 오래가려면 어떻게 해야 하는지
+5. *핵심 조언* — 상대 다루는 법 한 가지
 
 ## 분석 데이터
+- 궁합 유형: ${compatType.emoji} ${compatType.type} (${compatType.desc})
 - 일간 관계: ${dayMasterRelation.type} (${dayMasterRelation.desc})
 - 지지 충: ${branchAnalysis.clashes.length > 0 ? branchAnalysis.clashes.join(', ') : '없음'}
 - 지지 합: ${branchAnalysis.combines.length > 0 ? branchAnalysis.combines.join(', ') : '없음'}
-- 궁합 점수: 전체 ${scores.overall}%, 감정 ${scores.emotion}%, 끌림 ${scores.attraction}%, 장기 ${scores.longTerm}%
+- 점수: 감정 ${Math.round(scores.emotion)}%, 끌림 ${Math.round(scores.attraction)}%, 장기 ${Math.round(scores.longTerm)}%
 
 ## 포맷
 - *볼드*로 핵심 강조
 - 이모지 2-3개
-- 700자 이내
-
-반드시 [FREE]...[/FREE]와 [PREMIUM]...[/PREMIUM] 태그로 감싸서 출력.`,
+- 800자 이내
+- 태그 없이 자연스럽게`,
       },
       {
         role: 'user',
@@ -329,15 +323,15 @@ ${profile2.year}년 ${profile2.month}월 ${profile2.day}일 ${profile2.hour}시�
 "${question}"
 
 ---
-이 두 사람의 궁합을 분석해줘. 감탄하게 만들어.`.trim(),
+이 두 사람의 궁합을 분석해줘.`.trim(),
       },
     ],
   });
 
   const llmResponse = response.choices?.[0]?.message?.content?.trim() ?? '';
 
-  // 차트 + LLM 분석 결합
-  return `${chart}\n\n${compatType.emoji} *${compatType.type}*\n${compatType.desc}\n\n${llmResponse}`;
+  // 차트 (시각정보) + 궁합 유형 + LLM 분석 결합
+  return `${chart}\n\n${compatType.emoji} *${compatType.type}*\n_${compatType.desc}_\n\n${llmResponse}`;
 }
 
 // 궁합 질문인지 감지

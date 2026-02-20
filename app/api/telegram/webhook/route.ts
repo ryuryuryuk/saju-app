@@ -605,27 +605,8 @@ async function handleMessage(
             await deleteMessage(chatId, progressMsgId).catch(() => {});
           }
 
-          // FREE/PREMIUM 파싱 및 발송
-          const parsed = parseFreemiumSections(result);
-          if (parsed.hasPremium) {
-            const blurred = blurText(parsed.premiumText);
-            const displayText =
-              parsed.freeText +
-              '\n\n🔒 *조심해야 할 시기 + 장기 전망*\n' +
-              blurred +
-              '\n\n_이 관계의 핵심 포인트야_';
-
-            await sendMessage(chatId, displayText, {
-              parseMode: 'Markdown',
-              replyMarkup: {
-                inline_keyboard: [
-                  [{ text: '👆 전체 궁합 보기', callback_data: 'premium_unlock' }],
-                ],
-              },
-            });
-          } else {
-            await sendMessage(chatId, result, { parseMode: 'Markdown' });
-          }
+          // 궁합 결과 발송 (시각 차트가 맨 위에 있음)
+          await sendMessage(chatId, result, { parseMode: 'Markdown' });
 
           // DB에 저장
           await addDbTurn('telegram', userId, 'user', `궁합 질문: ${pendingCompat.question}`);
