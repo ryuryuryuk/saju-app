@@ -56,11 +56,18 @@ export class TelegramBotBlockedError extends Error {
   }
 }
 
+export interface TelegramSendResult {
+  ok: boolean;
+  statusCode: number;
+  description?: string;
+  messageId?: number;
+}
+
 export async function sendMessage(
   chatId: number,
   text: string,
   options?: TelegramSendMessageOptions,
-): Promise<void> {
+): Promise<TelegramSendResult> {
   const res = await fetch(`${BASE_URL}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -75,10 +82,19 @@ export async function sendMessage(
   if (res.status === 403) {
     throw new TelegramBotBlockedError(chatId);
   }
+
+  const body = await res.json().catch(() => ({ ok: false, description: 'Failed to parse response' }));
+
   if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`Telegram API error ${res.status}: ${body}`);
+    throw new Error(`Telegram API error ${res.status}: ${body.description ?? JSON.stringify(body)}`);
   }
+
+  return {
+    ok: body.ok ?? true,
+    statusCode: res.status,
+    description: body.description,
+    messageId: body.result?.message_id,
+  };
 }
 
 export async function sendChatAction(
@@ -98,6 +114,38 @@ export async function sendChatAction(
 export interface AnswerCallbackOptions {
   text?: string;
   showAlert?: boolean;
+}
+
+export async function editMessageText(
+  chatId: number,
+  messageId: number,
+  text: string,
+  parseMode?: 'Markdown' | 'HTML',
+): Promise<void> {
+  await fetch(`${BASE_URL}/editMessageText`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      chat_id: chatId,
+      message_id: messageId,
+      text,
+      ...(parseMode ? { parse_mode: parseMode } : {}),
+    }),
+  }).catch(() => {});
+}
+
+export async function deleteMessage(
+  chatId: number,
+  messageId: number,
+): Promise<void> {
+  await fetch(`${BASE_URL}/deleteMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      chat_id: chatId,
+      message_id: messageId,
+    }),
+  }).catch(() => {});
 }
 
 export async function answerCallbackQuery(

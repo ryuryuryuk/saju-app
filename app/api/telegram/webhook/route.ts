@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import OpenAI from 'openai';
 import type { TelegramUpdate, TelegramCallbackQuery } from '@/lib/telegram';
-import { sendMessage, sendChatAction, answerCallbackQuery } from '@/lib/telegram';
+import { sendMessage, sendChatAction, answerCallbackQuery, editMessageText, deleteMessage } from '@/lib/telegram';
 import { addTurn } from '@/lib/kakao-history';
 import { generateReply, extractAndValidateProfile } from '@/lib/kakao-service';
 import {
@@ -52,6 +52,26 @@ async function tryParseAndSaveProfile(
     birth_minute: Number(validated.minute),
     gender: validated.gender,
   });
+}
+
+const PROGRESS_STAGES = [
+  { pct: 15, label: '사주 명식 계산 중' },
+  { pct: 35, label: '고서 참조 검색 중' },
+  { pct: 55, label: '사주 구조 분석 중' },
+  { pct: 75, label: '사주 풀이 중' },
+  { pct: 90, label: '거의 다 됐어' },
+];
+
+const PROGRESS_INTERVAL_MS = 1500;
+
+function buildProgressBar(pct: number): string {
+  const filled = Math.round(pct / 10);
+  const empty = 10 - filled;
+  return '█'.repeat(filled) + '░'.repeat(empty);
+}
+
+function buildProgressText(header: string, pct: number, label: string): string {
+  return `${header}\n\n${buildProgressBar(pct)} ${pct}%\n${label}`;
 }
 
 const INTERIM_STYLES = [
@@ -396,11 +416,35 @@ async function handleMessage(
       // 3초 이내 완료 — 바로 발송
       reply = raceResult.reply;
     } else {
-      // 3초 초과 — 중간 메시지 발송 후 분석 대기
+      // 3초 초과 — 진행률 표시 메시지 발송 + 실시간 업데이트
       const interimMsg = await interimPromise;
-      await sendMessage(chatId, interimMsg);
-      await sendChatAction(chatId);
+      const header = `${interimMsg}\n\n🔮 사주 깊이 읽는 중...`;
+      const progressResult = await sendMessage(
+        chatId,
+        buildProgressText(header, 0, '분석 시작'),
+      );
+      const progressMsgId = progressResult.messageId;
+
+      let step = 0;
+      const progressInterval = setInterval(() => {
+        if (step < PROGRESS_STAGES.length && progressMsgId) {
+          const stage = PROGRESS_STAGES[step];
+          editMessageText(
+            chatId,
+            progressMsgId,
+            buildProgressText(header, stage.pct, stage.label),
+          ).catch(() => {});
+          step++;
+        }
+      }, PROGRESS_INTERVAL_MS);
+
       reply = await analysisPromise;
+      clearInterval(progressInterval);
+
+      // 진행률 메시지 삭제
+      if (progressMsgId) {
+        await deleteMessage(chatId, progressMsgId).catch(() => {});
+      }
     }
 
     // 9. 답변 저장 + 발송
