@@ -80,7 +80,12 @@ function getPersona(profile: unknown): string | null {
   return String(raw).trim() || null;
 }
 
-async function calculateSajuPillars(profile: BirthProfile): Promise<string> {
+interface UserSajuResult {
+  fullString: string;
+  dayStem: string;  // 사용자 일간
+}
+
+async function calculateSajuPillars(profile: BirthProfile): Promise<UserSajuResult> {
   const params = new URLSearchParams({
     y: String(profile.birth_year),
     m: String(profile.birth_month),
@@ -97,10 +102,27 @@ async function calculateSajuPillars(profile: BirthProfile): Promise<string> {
   }
 
   const data = await response.json();
-  return `${data.pillars.year}년 ${data.pillars.month}월 ${data.pillars.day}일 ${data.pillars.hour}시`;
+  const dayPillar = data.pillars.day;
+
+  return {
+    fullString: `${data.pillars.year}년 ${data.pillars.month}월 ${data.pillars.day}일 ${data.pillars.hour}시`,
+    dayStem: dayPillar[0],
+  };
 }
 
-async function getTodayGanji(gender: '남성' | '여성'): Promise<string> {
+interface TodayGanjiResult {
+  dayPillar: string;       // 예: "정묘"
+  dayStem: string;         // 천간: "정"
+  dayBranch: string;       // 지지: "묘"
+  dayStemElement: string;  // 천간 오행: "화"
+}
+
+const STEM_ELEMENTS: Record<string, string> = {
+  '갑': '목', '을': '목', '병': '화', '정': '화', '무': '토',
+  '기': '토', '경': '금', '신': '금', '임': '수', '계': '수',
+};
+
+async function getTodayGanji(gender: '남성' | '여성'): Promise<TodayGanjiResult> {
   const today = getSeoulNow();
   const params = new URLSearchParams({
     y: String(today.getUTCFullYear()),
@@ -118,17 +140,60 @@ async function getTodayGanji(gender: '남성' | '여성'): Promise<string> {
   }
 
   const data = await response.json();
-  return `${data.pillars.day}`;
+  const dayPillar = data.pillars.day;
+  const dayStem = dayPillar[0];
+  const dayBranch = dayPillar[1];
+
+  return {
+    dayPillar,
+    dayStem,
+    dayBranch,
+    dayStemElement: STEM_ELEMENTS[dayStem] || '미상',
+  };
+}
+
+function analyzeDayInteraction(userDayStem: string, todayDayStem: string): string {
+  const userElement = STEM_ELEMENTS[userDayStem];
+  const todayElement = STEM_ELEMENTS[todayDayStem];
+
+  if (!userElement || !todayElement) return '특별한 상호작용 없음';
+
+  const generates: Record<string, string> = { 목: '화', 화: '토', 토: '금', 금: '수', 수: '목' };
+  const controls: Record<string, string> = { 목: '토', 화: '금', 토: '수', 금: '목', 수: '화' };
+
+  if (userElement === todayElement) {
+    return `비겁(比劫) — 오늘 기운이 너랑 비슷해. 경쟁자가 나타나거나 내 페이스가 강해지는 날`;
+  }
+  if (generates[userElement] === todayElement) {
+    return `식상(食傷) — 네가 에너지를 발산하는 날. 표현력 UP, 창작/소통에 유리`;
+  }
+  if (generates[todayElement] === userElement) {
+    return `인성(印星) — 도움 받는 날. 어른/선배/멘토 찾아가면 좋아`;
+  }
+  if (controls[userElement] === todayElement) {
+    return `재성(財星) — 돈/이성 기회가 오는 날. 근데 과욕은 금물`;
+  }
+  if (controls[todayElement] === userElement) {
+    return `관성(官星) — 외부 압박이 올 수 있어. 조심스럽게 움직여`;
+  }
+
+  return '특별한 충돌 없이 무난한 날';
 }
 
 function buildFallbackMessage(categories: DailyMessageCategory[], persona: string | null): string {
   const primary = categories[0] || 'general';
   const emoji = CATEGORY_EMOJI[primary] || '✨';
-  const tone = persona ? `${persona}의 촉으로` : '오늘 흐름으로';
-  const text = `${emoji} 오늘의 키워드: ${primary}
-점심시간 전후, ${tone} ██시에 중요한 신호가 보여. ████ 쪽 선택을 미루지 말고 확인해.
-이 타이밍을 먼저 잡는 사람이 누굴까?`;
-  return text.slice(0, 200);
+  const tone = persona ? `${persona}의 촉으로 보면` : '오늘 흐름을 보면';
+  const text = `${emoji} 오늘의 3대 키워드: *집중* *타이밍* *선택*
+
+${tone}, 오늘 ██시~██시 사이가 황금 시간대야.
+████ 방향으로 움직이면 좋고, ████색 포인트로.
+
+점심 전에 ████ 해두면 저녁에 결과가 와.
+근데 ████한 사람은 오늘 피해.
+
+이 신호, 먼저 읽어낼 준비됐어?`;
+  return text.slice(0, 400);
 }
 
 function enforceMessageRules(raw: string, categories: DailyMessageCategory[]): string {
@@ -139,22 +204,27 @@ function enforceMessageRules(raw: string, categories: DailyMessageCategory[]): s
   const primary = categories[0] || 'general';
   const emoji = CATEGORY_EMOJI[primary] || '✨';
 
-  if (!lines[0].includes(emoji)) {
+  // 첫 줄에 이모지 추가
+  if (!lines[0].includes(emoji) && !lines[0].match(/^[🌟✨💸💘💼🩺⚠️🧭📅🤝📚]/)) {
     lines[0] = `${emoji} ${lines[0].replace(/^[-*•\s]+/, '')}`;
   }
 
   text = lines.join('\n');
 
-  if (!text.includes('████')) {
-    text = `${text}\n오늘의 핵심 변수는 ████.`;
+  // 블랭크가 없으면 추가
+  const blankCount = (text.match(/████/g) || []).length;
+  if (blankCount < 2) {
+    text = `${text}\n오늘의 핵심 타이밍은 ██시, ████ 방향이야.`;
   }
 
+  // 질문으로 안 끝나면 추가
   if (!text.includes('?')) {
-    text = `${text}\n오늘, 이 신호를 먼저 읽어낼 수 있을까?`;
+    text = `${text}\n이 신호, 먼저 읽어낼 수 있을까?`;
   }
 
-  if (text.length > 200) {
-    text = text.slice(0, 200).trim();
+  // 400자 제한
+  if (text.length > 400) {
+    text = text.slice(0, 400).trim();
   }
 
   return text;
@@ -192,10 +262,14 @@ export async function generateDailyMessage(userId: number): Promise<DailyMessage
     gender: profile.gender,
   };
 
-  const [natalSaju, todayGanji] = await Promise.all([
+  const [userSaju, todayGanji] = await Promise.all([
     calculateSajuPillars(birthProfile),
     getTodayGanji(profile.gender),
   ]);
+
+  // 일간-일진 상호작용 분석
+  const dayInteraction = analyzeDayInteraction(userSaju.dayStem, todayGanji.dayStem);
+  const userElement = STEM_ELEMENTS[userSaju.dayStem] || '미상';
 
   const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
   const dateText = formatSeoulDate(now);
@@ -204,19 +278,34 @@ export async function generateDailyMessage(userId: number): Promise<DailyMessage
   const completion = await client.chat.completions.create({
     model: MODEL,
     temperature: 0.85,
-    max_completion_tokens: 220,
+    max_completion_tokens: 450,
     messages: [
       { role: 'system', content: DAILY_PUSH_SYSTEM_PROMPT },
       {
         role: 'user',
         content: [
-          `[오늘 날짜] ${dateText}`,
-          `[관심 카테고리] ${categoryText}`,
-          `[사용자 페르소나] ${persona ?? '없음'}`,
-          `[사용자 사주 원국] ${natalSaju}`,
-          `[오늘의 천간지지] ${todayGanji}`,
-          '[메시지 톤 가이드] 카테고리 톤 가이드를 강하게 반영',
-          '200자 이내, 첫 줄 키워드+이모지, 구체 시간/상황, ████ 1회 이상, 마지막 줄은 궁금증 유발 문장으로 작성.',
+          `[오늘] ${dateText}`,
+          `[오늘의 일진] ${todayGanji.dayPillar}일 (${todayGanji.dayStemElement} 기운)`,
+          ``,
+          `[사용자 정보]`,
+          `- 사주 원국: ${userSaju.fullString}`,
+          `- 일간: ${userSaju.dayStem} (${userElement})`,
+          `- 관심사: ${categoryText}`,
+          `- 페르소나: ${persona ?? '없음'}`,
+          ``,
+          `[오늘의 일간-일진 관계]`,
+          `${dayInteraction}`,
+          ``,
+          `[작성 지침]`,
+          `1. 첫 줄: "오늘 ${todayGanji.dayPillar}일, 네 ${userSaju.dayStem}${userElement}에게는..." 으로 시작`,
+          `2. 3대 키워드 제시`,
+          `3. 황금 시간대 (██시~██시) — 블랭크`,
+          `4. 길방 (████ 방향) — 블랭크`,
+          `5. 주의 인물 (████한 사람) — 블랭크`,
+          `6. 액션 가이드 (████ 해둬) — 블랭크`,
+          `7. 마지막: 궁금증 유발 질문`,
+          ``,
+          `350자 내외. 블랭크 최소 4개. GPT 티 빼고 친한 형/언니 톤.`,
         ].join('\n'),
       },
     ],
@@ -280,8 +369,8 @@ export async function generateFullDailyMessage(userId: number): Promise<string> 
           `[오늘 날짜] ${dateText}`,
           `[관심 카테고리] ${categoryText}`,
           `[사용자 페르소나] ${persona ?? '없음'}`,
-          `[사용자 사주 원국] ${natalSaju}`,
-          `[오늘의 천간지지] ${todayGanji}`,
+          `[사용자 사주 원국] ${natalSaju.fullString}`,
+          `[오늘의 천간지지] ${todayGanji.dayPillar}일 (${todayGanji.dayStemElement} 기운)`,
           '블랭크(████) 없이 모든 정보를 공개하여 500자 내외로 작성.',
         ].join('\n'),
       },
@@ -334,8 +423,8 @@ export async function generateHintMessage(userId: number): Promise<string> {
           `[오늘 날짜] ${dateText}`,
           `[관심 카테고리] ${categoryText}`,
           `[사용자 페르소나] ${persona ?? '없음'}`,
-          `[사용자 사주 원국] ${natalSaju}`,
-          `[오늘의 천간지지] ${todayGanji}`,
+          `[사용자 사주 원국] ${natalSaju.fullString}`,
+          `[오늘의 천간지지] ${todayGanji.dayPillar}일 (${todayGanji.dayStemElement} 기운)`,
           '블랭크 1개만 해제. 150자 이내. 마지막에 "내일도 아침에 찾아올게요 🌅"',
         ].join('\n'),
       },

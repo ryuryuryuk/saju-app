@@ -650,11 +650,14 @@ async function handleMessage(
             await deleteMessage(chatId, progressMsgId).catch(() => {});
           }
 
-          // FREE/PREMIUM 파싱 및 발송
+          // FREE/PREMIUM 파싱 — 차트(태그 바깥)가 잘리지 않도록 처리
           const parsed = parseFreemiumSections(result);
+          const beforeFree = result.split('[FREE]')[0]?.trim() ?? '';
+
           if (parsed.hasPremium) {
             const blurred = blurText(parsed.premiumText);
             const displayText =
+              (beforeFree ? beforeFree + '\n\n' : '') +
               parsed.freeText +
               '\n\n🔒 *더 솔직한 이야기*\n' +
               blurred +
