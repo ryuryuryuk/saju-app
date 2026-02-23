@@ -355,8 +355,33 @@ export async function generateDailyMessage(userId: number): Promise<DailyMessage
     ],
   });
 
-  const rawText = completion.choices?.[0]?.message?.content?.trim() || '';
-  const text = enforceMessageRules(rawText, categories);
+  let rawText = completion.choices?.[0]?.message?.content?.trim() || '';
+
+  // 일진 강제 교정: LLM이 잘못된 일진을 생성했을 경우 정확한 일진으로 교체
+  const correctDayPillar = todayGanji.dayPillar;
+  const wrongPillars = ['갑자', '을축', '병인', '정묘', '무진', '기사', '경오', '신미', '임신', '계유',
+    '갑술', '을해', '병자', '정축', '무인', '기묘', '경진', '신사', '임오', '계미',
+    '갑신', '을유', '병술', '정해', '무자', '기축', '경인', '신묘', '임진', '계사',
+    '갑오', '을미', '병신', '정유', '무술', '기해', '경자', '신축', '임인', '계묘',
+    '갑진', '을사', '병오', '정미', '무신', '기유', '경술', '신해', '임자', '계축',
+    '갑인', '을묘', '병진', '정사', '무오', '기미', '경신', '신유', '임술', '계해'];
+
+  for (const wrong of wrongPillars) {
+    if (wrong !== correctDayPillar && rawText.includes(wrong + '일')) {
+      rawText = rawText.replace(new RegExp(wrong + '일', 'g'), correctDayPillar + '일');
+      console.log(`[daily-message] Corrected day pillar: ${wrong} → ${correctDayPillar}`);
+    }
+  }
+
+  let text = enforceMessageRules(rawText, categories);
+
+  // 메시지 시작에 정확한 일진 보장
+  const expectedStart = `${monthDay}`;
+  if (!text.startsWith(expectedStart)) {
+    // 첫 줄이 날짜로 시작하지 않으면 추가
+    const dayPillarHeader = `📅 ${monthDay} ${todayGanji.dayPillar}일\n\n`;
+    text = dayPillarHeader + text;
+  }
 
   return {
     text,
