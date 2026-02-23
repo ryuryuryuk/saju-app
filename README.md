@@ -280,4 +280,4 @@ MIT License
 
 **사주비서** - AI와 동양 철학의 만남
 
-문의: [Telegram Bot](https://t.me/SajuSecretaryBot)
+문의: binnxr@naver.com
