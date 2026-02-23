@@ -26,6 +26,10 @@ import {
   getPartnerProfileRequest,
   generateCompatibilityAnalysis,
 } from '@/lib/compatibility';
+import {
+  isWealthQuestion,
+  generateWealthAnalysis,
+} from '@/lib/wealth-analysis';
 
 // 궁합 대기 상태 (userId -> 대기중)
 const compatibilityPending = new Map<string, { requestedAt: number; question: string }>();
@@ -83,6 +87,16 @@ const COMPAT_PROGRESS_STAGES = [
   { pct: 25, label: '일간 관계 분석 중' },
   { pct: 40, label: '지지 충합 확인 중' },
   { pct: 55, label: '오행 보완 분석 중' },
+
+const WEALTH_PROGRESS_STAGES = [
+  { pct: 10, label: '재성 구조 분석 중' },
+  { pct: 25, label: '식상 생산력 확인 중' },
+  { pct: 40, label: '비겁 손재 위험 체크 중' },
+  { pct: 55, label: '년운 재물 흐름 분석 중' },
+  { pct: 70, label: '투자 타이밍 계산 중' },
+  { pct: 85, label: '재물 전략 수립 중' },
+  { pct: 95, label: '거의 다 됐어 💰' },
+];
   { pct: 70, label: '궁합 점수 계산 중' },
   { pct: 85, label: '관계 풀이 작성 중' },
   { pct: 95, label: '거의 다 됐어 💕' },
@@ -794,6 +808,88 @@ async function handleMessage(
     if (isCompatibilityQuestion(utterance)) {
       compatibilityPending.set(userId, { requestedAt: Date.now(), question: utterance });
       await sendMessage(chatId, getPartnerProfileRequest(), { parseMode: 'Markdown' });
+      return;
+    }
+
+    // 재물운 전문 분석 감지
+    if (isWealthQuestion(utterance)) {
+      // 진행률 표시 시작
+      const wealthHeader = '💰 *재물운 깊이 분석 중...*';
+      const progressResult = await sendMessage(
+        chatId,
+        buildProgressText(wealthHeader, 0, '시작'),
+        { parseMode: 'Markdown' },
+      );
+      const progressMsgId = progressResult.messageId;
+
+      let wealthStep = 0;
+      const wealthProgressInterval = setInterval(() => {
+        if (wealthStep < WEALTH_PROGRESS_STAGES.length && progressMsgId) {
+          const stage = WEALTH_PROGRESS_STAGES[wealthStep];
+          editMessageText(
+            chatId,
+            progressMsgId,
+            buildProgressText(wealthHeader, stage.pct, stage.label),
+          ).catch(() => {});
+          wealthStep++;
+        }
+      }, PROGRESS_INTERVAL_MS);
+
+      try {
+        const storedBirthProfile = {
+          year: String(profile.birth_year),
+          month: String(profile.birth_month),
+          day: String(profile.birth_day),
+          hour: String(profile.birth_hour),
+          minute: String(profile.birth_minute),
+          gender: profile.gender as '남성' | '여성',
+        };
+
+        const saju = await calculateSajuFromAPI(storedBirthProfile);
+        const result = await generateWealthAnalysis(saju, storedBirthProfile, utterance);
+
+        // 진행률 정리
+        clearInterval(wealthProgressInterval);
+        if (progressMsgId) {
+          await deleteMessage(chatId, progressMsgId).catch(() => {});
+        }
+
+        // FREE/PREMIUM 파싱
+        const parsed = parseFreemiumSections(result);
+        const beforeFree = result.split('[FREE]')[0]?.trim() ?? '';
+
+        // DB 저장
+        await addDbTurn('telegram', userId, 'user', utterance);
+        await addDbTurn('telegram', userId, 'assistant', result);
+
+        if (parsed.hasPremium) {
+          const blurred = blurText(parsed.premiumText);
+          const displayText =
+            (beforeFree ? beforeFree + '\n\n' : '') +
+            parsed.freeText +
+            '\n\n🔒 *진짜 돈 되는 정보는 여기부터*\n' +
+            blurred +
+            '\n\n_투자 타이밍, 피해야 할 것, 5년 전망..._';
+
+          await sendMessage(chatId, displayText, {
+            parseMode: 'Markdown',
+            replyMarkup: {
+              inline_keyboard: [
+                [{ text: '💰 재물 핵심 정보 열기', callback_data: 'premium_unlock' }],
+              ],
+            },
+          });
+        } else {
+          await sendMessage(chatId, result, { parseMode: 'Markdown' });
+        }
+      } catch (err) {
+        clearInterval(wealthProgressInterval);
+        if (progressMsgId) {
+          await deleteMessage(chatId, progressMsgId).catch(() => {});
+        }
+        console.error('[telegram] wealth analysis error:', err);
+        await sendMessage(chatId, '재물운 분석 중 오류가 발생했어요. 다시 시도해주세요!');
+      }
       return;
     }
 
