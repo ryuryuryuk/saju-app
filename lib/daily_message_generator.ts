@@ -269,10 +269,13 @@ export async function generateDailyMessage(userId: number): Promise<DailyMessage
 
   // 일간-일진 상호작용 분석
   const dayInteraction = analyzeDayInteraction(userSaju.dayStem, todayGanji.dayStem);
-  const userElement = STEM_ELEMENTS[userSaju.dayStem] || '미상';
+  const userElement = STEM_ELEMENTS[userSaju.dayStem] || '';
+  const userElementDisplay = userElement ? ` (${userElement})` : '';
 
   const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
   const dateText = formatSeoulDate(now);
+  // 월/일 추출
+  const monthDay = `${now.getMonth() + 1}월 ${now.getDate()}일`;
   const categoryText = categories.join(' + ');
 
   const completion = await client.chat.completions.create({
@@ -284,12 +287,12 @@ export async function generateDailyMessage(userId: number): Promise<DailyMessage
       {
         role: 'user',
         content: [
-          `[오늘] ${dateText}`,
+          `[오늘] ${dateText} (${monthDay})`,
           `[오늘의 일진] ${todayGanji.dayPillar}일 (${todayGanji.dayStemElement} 기운)`,
           ``,
           `[사용자 정보]`,
           `- 사주 원국: ${userSaju.fullString}`,
-          `- 일간: ${userSaju.dayStem} (${userElement})`,
+          `- 일간: ${userSaju.dayStem}${userElementDisplay}`,
           `- 관심사: ${categoryText}`,
           `- 페르소나: ${persona ?? '없음'}`,
           ``,
@@ -297,7 +300,7 @@ export async function generateDailyMessage(userId: number): Promise<DailyMessage
           `${dayInteraction}`,
           ``,
           `[작성 지침]`,
-          `1. 첫 줄: "오늘 ${todayGanji.dayPillar}일, 네 ${userSaju.dayStem}${userElement}에게는..." 으로 시작`,
+          `1. 첫 줄: "${monthDay}, 오늘 ${todayGanji.dayPillar}일! 네 ${userSaju.dayStem}${userElement ? userElement : ''}에게는..." 으로 시작`,
           `2. 3대 키워드 제시`,
           `3. 황금 시간대 (██시~██시) — 블랭크`,
           `4. 길방 (████ 방향) — 블랭크`,
