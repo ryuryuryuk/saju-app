@@ -111,10 +111,10 @@ async function calculateSajuPillars(profile: BirthProfile): Promise<UserSajuResu
 }
 
 interface TodayGanjiResult {
-  dayPillar: string;       // 예: "정묘"
-  dayStem: string;         // 천간: "정"
-  dayBranch: string;       // 지지: "묘"
-  dayStemElement: string;  // 천간 오행: "화"
+  dayPillar: string;       // 예: "무진"
+  dayStem: string;         // 천간: "무"
+  dayBranch: string;       // 지지: "진"
+  dayStemElement: string;  // 천간 오행: "토"
 }
 
 const STEM_ELEMENTS: Record<string, string> = {
@@ -122,7 +122,45 @@ const STEM_ELEMENTS: Record<string, string> = {
   '기': '토', '경': '금', '신': '금', '임': '수', '계': '수',
 };
 
-async function getTodayGanji(gender: '남성' | '여성'): Promise<TodayGanjiResult> {
+// 천간 (10개)
+const STEMS = ['갑', '을', '병', '정', '무', '기', '경', '신', '임', '계'];
+// 지지 (12개)
+const BRANCHES = ['자', '축', '인', '묘', '진', '사', '오', '미', '신', '유', '술', '해'];
+
+/**
+ * 60갑자 기반 일진 계산 (직접 구현)
+ * 기준일: 2026-02-23 = 무진일 (戊辰)
+ * - 무(戊) = 천간 index 4
+ * - 진(辰) = 지지 index 4
+ */
+function calculateDayPillar(year: number, month: number, day: number): { stem: string; branch: string } {
+  // 기준일: 2026년 2월 23일 = 무진일
+  const referenceDate = new Date(Date.UTC(2026, 1, 23)); // 월은 0-indexed
+  const referenceStemIndex = 4;  // 무
+  const referenceBranchIndex = 4; // 진
+
+  // 계산할 날짜
+  const targetDate = new Date(Date.UTC(year, month - 1, day));
+
+  // 일수 차이 계산
+  const diffTime = targetDate.getTime() - referenceDate.getTime();
+  const diffDays = Math.round(diffTime / (1000 * 60 * 60 * 24));
+
+  // 천간은 10일 주기, 지지는 12일 주기
+  let stemIndex = (referenceStemIndex + diffDays) % 10;
+  let branchIndex = (referenceBranchIndex + diffDays) % 12;
+
+  // 음수 처리
+  if (stemIndex < 0) stemIndex += 10;
+  if (branchIndex < 0) branchIndex += 12;
+
+  return {
+    stem: STEMS[stemIndex],
+    branch: BRANCHES[branchIndex],
+  };
+}
+
+function getTodayGanji(): TodayGanjiResult {
   // 서울 시간 기준 날짜 추출
   const now = new Date();
   const seoulParts = new Intl.DateTimeFormat('en-CA', {
@@ -133,35 +171,19 @@ async function getTodayGanji(gender: '남성' | '여성'): Promise<TodayGanjiRes
   }).formatToParts(now);
 
   const pick = (type: string) => seoulParts.find((p) => p.type === type)?.value ?? '01';
-  const seoulYear = pick('year');
-  const seoulMonth = pick('month');
-  const seoulDay = pick('day');
+  const seoulYear = Number(pick('year'));
+  const seoulMonth = Number(pick('month'));
+  const seoulDay = Number(pick('day'));
 
-  const params = new URLSearchParams({
-    y: seoulYear,
-    m: String(Number(seoulMonth)),  // 앞의 0 제거
-    d: String(Number(seoulDay)),    // 앞의 0 제거
-    hh: '12',
-    mm: '0',
-    calendar: 'solar',
-    gender: gender === '여성' ? '여' : '남',
-  });
-
-  const response = await fetch(`https://beta-ybz6.onrender.com/api/saju?${params}`);
-  if (!response.ok) {
-    throw new Error('오늘 천간지지 계산 실패');
-  }
-
-  const data = await response.json();
-  const dayPillar = data.pillars.day;
-  const dayStem = dayPillar[0];
-  const dayBranch = dayPillar[1];
+  // 직접 계산
+  const { stem: dayStem, branch: dayBranch } = calculateDayPillar(seoulYear, seoulMonth, seoulDay);
+  const dayPillar = `${dayStem}${dayBranch}`;
 
   return {
     dayPillar,
     dayStem,
     dayBranch,
-    dayStemElement: STEM_ELEMENTS[dayStem] || '미상',
+    dayStemElement: STEM_ELEMENTS[dayStem] || '',
   };
 }
 
@@ -277,7 +299,7 @@ export async function generateDailyMessage(userId: number): Promise<DailyMessage
 
   const [userSaju, todayGanji] = await Promise.all([
     calculateSajuPillars(birthProfile),
-    getTodayGanji(profile.gender),
+    Promise.resolve(getTodayGanji()),
   ]);
 
   // 일간-일진 상호작용 분석
@@ -372,7 +394,7 @@ export async function generateFullDailyMessage(userId: number): Promise<string> 
 
   const [natalSaju, todayGanji] = await Promise.all([
     calculateSajuPillars(birthProfile),
-    getTodayGanji(profile.gender),
+    Promise.resolve(getTodayGanji()),
   ]);
 
   const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -426,7 +448,7 @@ export async function generateHintMessage(userId: number): Promise<string> {
 
   const [natalSaju, todayGanji] = await Promise.all([
     calculateSajuPillars(birthProfile),
-    getTodayGanji(profile.gender),
+    Promise.resolve(getTodayGanji()),
   ]);
 
   const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
