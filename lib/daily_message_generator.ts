@@ -123,11 +123,24 @@ const STEM_ELEMENTS: Record<string, string> = {
 };
 
 async function getTodayGanji(gender: '남성' | '여성'): Promise<TodayGanjiResult> {
-  const today = getSeoulNow();
+  // 서울 시간 기준 날짜 추출
+  const now = new Date();
+  const seoulParts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Seoul',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(now);
+
+  const pick = (type: string) => seoulParts.find((p) => p.type === type)?.value ?? '01';
+  const seoulYear = pick('year');
+  const seoulMonth = pick('month');
+  const seoulDay = pick('day');
+
   const params = new URLSearchParams({
-    y: String(today.getUTCFullYear()),
-    m: String(today.getUTCMonth() + 1),
-    d: String(today.getUTCDate()),
+    y: seoulYear,
+    m: String(Number(seoulMonth)),  // 앞의 0 제거
+    d: String(Number(seoulDay)),    // 앞의 0 제거
     hh: '12',
     mm: '0',
     calendar: 'solar',
@@ -274,8 +287,14 @@ export async function generateDailyMessage(userId: number): Promise<DailyMessage
 
   const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
   const dateText = formatSeoulDate(now);
-  // 월/일 추출
-  const monthDay = `${now.getMonth() + 1}월 ${now.getDate()}일`;
+  // 서울 시간 기준 월/일 추출
+  const seoulDateParts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Seoul',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(now);
+  const pickDate = (type: string) => seoulDateParts.find((p) => p.type === type)?.value ?? '01';
+  const monthDay = `${Number(pickDate('month'))}월 ${Number(pickDate('day'))}일`;
   const categoryText = categories.join(' + ');
 
   const completion = await client.chat.completions.create({
