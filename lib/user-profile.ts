@@ -11,6 +11,9 @@ export interface UserProfile {
   birth_hour: number;
   birth_minute: number;
   gender: '남성' | '여성';
+  referral_code?: string;
+  free_unlocks?: number;
+  referred_by?: string;
   created_at?: string;
   updated_at?: string;
 }
@@ -215,4 +218,201 @@ export async function addDbTurn(
     const idsToDelete = rows.slice(0, rows.length - MAX_HISTORY_ROWS).map((r) => r.id);
     await supabase.from('conversation_history').delete().in('id', idsToDelete);
   }
+}
+
+// ===== 추천 시스템 (Referral System) =====
+
+/**
+ * 고유 추천 코드 생성 (6자리 영숫자)
+ */
+function generateReferralCode(): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // 혼동 방지: I,O,0,1 제외
+  let code = '';
+  for (let i = 0; i < 6; i++) {
+    code += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return code;
+}
+
+/**
+ * 사용자의 추천 코드 조회 (없으면 생성)
+ */
+export async function getReferralCode(
+  platform: string,
+  platformUserId: string,
+): Promise<string | null> {
+  if (!supabase) return null;
+
+  // 기존 코드 조회
+  const { data } = await supabase
+    .from('user_profiles')
+    .select('referral_code')
+    .eq('platform', platform)
+    .eq('platform_user_id', platformUserId)
+    .single();
+
+  if (data?.referral_code) return data.referral_code;
+
+  // 없으면 새로 생성
+  let newCode = generateReferralCode();
+  let attempts = 0;
+
+  // 중복 체크 및 재생성
+  while (attempts < 5) {
+    const { data: existing } = await supabase
+      .from('user_profiles')
+      .select('id')
+      .eq('referral_code', newCode)
+      .single();
+
+    if (!existing) break;
+    newCode = generateReferralCode();
+    attempts++;
+  }
+
+  // 코드 저장
+  const { error } = await supabase
+    .from('user_profiles')
+    .update({ referral_code: newCode })
+    .eq('platform', platform)
+    .eq('platform_user_id', platformUserId);
+
+  if (error) {
+    console.error('[referral] Failed to save referral code:', error.message);
+    return null;
+  }
+
+  return newCode;
+}
+
+/**
+ * 추천 코드로 추천인 조회
+ */
+export async function getUserByReferralCode(
+  referralCode: string,
+): Promise<{ platform: string; platform_user_id: string } | null> {
+  if (!supabase) return null;
+
+  const { data, error } = await supabase
+    .from('user_profiles')
+    .select('platform, platform_user_id')
+    .eq('referral_code', referralCode.toUpperCase())
+    .single();
+
+  if (error || !data) return null;
+  return data;
+}
+
+/**
+ * 추천인 등록 및 양쪽 보상 지급
+ * - 신규 사용자의 referred_by 설정
+ * - 추천인과 신규 사용자 모두에게 free_unlocks +1
+ */
+export async function processReferral(
+  platform: string,
+  newUserId: string,
+  referralCode: string,
+): Promise<{ success: boolean; referrerUserId?: string }> {
+  if (!supabase) return { success: false };
+
+  // 추천인 조회
+  const referrer = await getUserByReferralCode(referralCode);
+  if (!referrer) return { success: false };
+
+  // 자기 자신 추천 방지
+  if (referrer.platform === platform && referrer.platform_user_id === newUserId) {
+    return { success: false };
+  }
+
+  // 이미 추천인이 등록되어 있는지 확인
+  const { data: existingProfile } = await supabase
+    .from('user_profiles')
+    .select('referred_by')
+    .eq('platform', platform)
+    .eq('platform_user_id', newUserId)
+    .single();
+
+  if (existingProfile?.referred_by) {
+    // 이미 추천인이 있으면 무시
+    return { success: false };
+  }
+
+  // 신규 사용자에게 추천인 등록 + 무료 열람권 1회
+  await supabase
+    .from('user_profiles')
+    .update({
+      referred_by: referralCode,
+      free_unlocks: supabase.rpc ? 1 : 1, // increment handled below
+    })
+    .eq('platform', platform)
+    .eq('platform_user_id', newUserId);
+
+  // 추천인에게 무료 열람권 1회 추가
+  await supabase.rpc('increment_free_unlocks', {
+    p_platform: referrer.platform,
+    p_user_id: referrer.platform_user_id,
+    p_amount: 1,
+  });
+
+  // 신규 사용자에게도 무료 열람권 1회 추가
+  await supabase.rpc('increment_free_unlocks', {
+    p_platform: platform,
+    p_user_id: newUserId,
+    p_amount: 1,
+  });
+
+  console.log(`[referral] Success: ${referrer.platform_user_id} -> ${newUserId}`);
+  return { success: true, referrerUserId: referrer.platform_user_id };
+}
+
+/**
+ * 무료 열람권 개수 조회
+ */
+export async function getFreeUnlocks(
+  platform: string,
+  platformUserId: string,
+): Promise<number> {
+  if (!supabase) return 0;
+
+  const { data } = await supabase
+    .from('user_profiles')
+    .select('free_unlocks')
+    .eq('platform', platform)
+    .eq('platform_user_id', platformUserId)
+    .single();
+
+  return data?.free_unlocks ?? 0;
+}
+
+/**
+ * 무료 열람권 사용 (1회 차감)
+ * 성공하면 true, 열람권이 없으면 false
+ */
+export async function useFreeUnlock(
+  platform: string,
+  platformUserId: string,
+): Promise<boolean> {
+  if (!supabase) return false;
+
+  const current = await getFreeUnlocks(platform, platformUserId);
+  if (current <= 0) return false;
+
+  const { error } = await supabase.rpc('decrement_free_unlocks', {
+    p_platform: platform,
+    p_user_id: platformUserId,
+  });
+
+  if (error) {
+    console.error('[referral] Failed to use free unlock:', error.message);
+    return false;
+  }
+
+  return true;
+}
+
+/**
+ * 추천 링크 생성
+ */
+export function buildReferralLink(referralCode: string, botUsername: string = 'SajuSecretaryBot'): string {
+  return `https://t.me/${botUsername}?start=ref_${referralCode}`;
 }

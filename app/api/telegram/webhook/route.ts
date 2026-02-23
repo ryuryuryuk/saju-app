@@ -11,6 +11,11 @@ import {
   getDbHistory,
   addDbTurn,
   isPremiumUser,
+  processReferral,
+  getReferralCode,
+  getFreeUnlocks,
+  useFreeUnlock,
+  buildReferralLink,
 } from '@/lib/user-profile';
 import type { UserProfile } from '@/lib/user-profile';
 import { trackInterest } from '@/lib/interest-helpers';
@@ -24,6 +29,9 @@ import {
 
 // 궁합 대기 상태 (userId -> 대기중)
 const compatibilityPending = new Map<string, { requestedAt: number; question: string }>();
+
+// 추천 코드 대기 상태 (userId -> referralCode)
+const pendingReferrals = new Map<string, string>();
 
 const INTERIM_TIMEOUT_MS = 3000;
 
@@ -322,6 +330,7 @@ async function handleCallbackQuery(query: TelegramCallbackQuery): Promise<void> 
       case 'premium_unlock': {
         await answerCallbackQuery(callbackId);
         const premium = await isPremiumUser('telegram', userId);
+        const freeUnlocks = await getFreeUnlocks('telegram', userId);
         const dbHist = await getDbHistory('telegram', userId);
         const lastAssistant = [...dbHist].reverse().find((h) => h.role === 'assistant');
         const lastUser = [...dbHist].reverse().find((h) => h.role === 'user');
@@ -330,6 +339,30 @@ async function handleCallbackQuery(query: TelegramCallbackQuery): Promise<void> 
         const isCompatibility = lastAssistant?.content?.includes('궁합 분석') ||
                                 lastAssistant?.content?.includes('💕 궁합') ||
                                 lastUser?.content?.includes('궁합');
+
+        // 무료 열람권이 있는 경우
+        if (freeUnlocks > 0) {
+          const used = await useFreeUnlock('telegram', userId);
+          if (used && lastAssistant) {
+            const fullText = cleanTags(lastAssistant.content);
+            const remaining = freeUnlocks - 1;
+            await sendMessage(
+              chatId,
+              `🎁 *무료 열람권 사용!* (남은 횟수: ${remaining}회)\n\n${fullText}\n\n` +
+                '───────────────\n' +
+                '💡 친구에게 공유하면 무료 열람권을 더 받을 수 있어요!',
+              {
+                parseMode: 'Markdown',
+                replyMarkup: {
+                  inline_keyboard: [
+                    [{ text: '🔗 친구 초대하고 열람권 받기', callback_data: 'get_referral_link' }],
+                  ],
+                },
+              },
+            );
+            return;
+          }
+        }
 
         if (premium) {
           // 유료 사용자 → DB에서 마지막 어시스턴트 답변 full 버전 발송
@@ -426,6 +459,27 @@ async function handleCallbackQuery(query: TelegramCallbackQuery): Promise<void> 
         break;
       }
 
+      case 'get_referral_link': {
+        await answerCallbackQuery(callbackId);
+        const referralCode = await getReferralCode('telegram', userId);
+        if (referralCode) {
+          const link = buildReferralLink(referralCode);
+          await sendMessage(
+            chatId,
+            '🔗 *친구 초대 링크*\n\n' +
+              `${link}\n\n` +
+              '이 링크로 친구가 가입하면:\n' +
+              '✦ 친구에게 무료 열람권 1회\n' +
+              '✦ 나에게도 무료 열람권 1회!\n\n' +
+              '링크를 복사해서 친구에게 공유해보세요 💫',
+            { parseMode: 'Markdown' },
+          );
+        } else {
+          await sendMessage(chatId, '추천 링크 생성에 실패했어요. 다시 시도해주세요!');
+        }
+        break;
+      }
+
       case 'chat_start': {
         // 일반 채팅 연결 + 로그 기록
         await answerCallbackQuery(callbackId, { text: '질문을 입력해주세요!' });
@@ -509,17 +563,56 @@ async function handleMessage(
       return;
     }
 
+    // 4-1. /invite 명령어: 친구 초대 링크
+    if (utterance === '/invite') {
+      const referralCode = await getReferralCode('telegram', userId);
+      const freeUnlocks = await getFreeUnlocks('telegram', userId);
+      if (referralCode) {
+        const link = buildReferralLink(referralCode);
+        await sendMessage(
+          chatId,
+          '🔗 *친구 초대 링크*\n\n' +
+            `${link}\n\n` +
+            '이 링크로 친구가 가입하면:\n' +
+            '✦ 친구에게 무료 열람권 1회\n' +
+            '✦ 나에게도 무료 열람권 1회!\n\n' +
+            `현재 내 무료 열람권: *${freeUnlocks}회*\n\n` +
+            '링크를 복사해서 친구에게 공유해보세요 💫',
+          { parseMode: 'Markdown' },
+        );
+      } else {
+        await sendMessage(
+          chatId,
+          '먼저 프로필을 등록해주세요!\n\n예: 1994년 10월 3일 오후 7시 30분 여성',
+        );
+      }
+      return;
+    }
+
     // 5. 프로필이 없으면 — 생년월일 파싱 → 저장 → 무료 첫 분석 자동 발송
     if (!profile) {
       const saved = await tryParseAndSaveProfile(userId, utterance, displayName);
       if (saved) {
+        // 추천 코드 처리 (대기 중인 경우)
+        const pendingRefCode = pendingReferrals.get(userId);
+        let referralBonus = '';
+        if (pendingRefCode) {
+          pendingReferrals.delete(userId);
+          const result = await processReferral('telegram', userId, pendingRefCode);
+          if (result.success) {
+            referralBonus = '\n\n🎁 *친구 추천 보상!* 무료 열람권 1회가 지급되었어요!';
+          }
+        }
+
         await sendMessage(
           chatId,
           `프로필을 저장했어요! 🎉\n\n` +
             `생년월일: ${saved.birth_year}년 ${saved.birth_month}월 ${saved.birth_day}일\n` +
             `시간: ${saved.birth_hour}시 ${saved.birth_minute}분\n` +
-            `성별: ${saved.gender}\n\n` +
-            `지금 바로 무료 사주 분석을 시작할게요...`,
+            `성별: ${saved.gender}` +
+            referralBonus +
+            `\n\n지금 바로 무료 사주 분석을 시작할게요...`,
+          { parseMode: 'Markdown' },
         );
 
         // 첫 분석 진행률 표시 + 생성
@@ -857,9 +950,18 @@ export async function POST(req: NextRequest) {
     const utterance = message.text.trim();
     const displayName = extractName(message.from);
 
-    // /start 명령어 처리
-    if (utterance === '/start') {
+    // /start 명령어 처리 (추천 링크 포함)
+    if (utterance.startsWith('/start')) {
       const profile = await getProfile('telegram', userId);
+
+      // 추천 코드 파싱: /start ref_XXXXXX
+      const refMatch = utterance.match(/\/start\s+ref_([A-Z0-9]+)/i);
+      if (refMatch && !profile) {
+        // 신규 사용자 + 추천 코드 있음 → 임시 저장 (프로필 등록 후 처리)
+        // 추천 코드를 메모리에 저장 (추후 프로필 저장 시 처리)
+        pendingReferrals.set(userId, refMatch[1].toUpperCase());
+      }
+
       if (profile) {
         await sendMessage(
           chatId,
@@ -869,13 +971,16 @@ export async function POST(req: NextRequest) {
             `명령어:\n/profile - 내 프로필 보기\n/reset - 프로필 초기화`,
         );
       } else {
-        await sendMessage(
-          chatId,
-          '안녕하세요! AI 사주 분석 서비스입니다.\n\n' +
+        const welcomeMsg = refMatch
+          ? '🎁 *친구 추천으로 오셨군요!*\n\n' +
+            '프로필 등록하면 무료 열람권 1회를 드릴게요!\n\n' +
+            '생년월일시와 성별을 알려주세요.\n' +
+            '예: 1994년 10월 3일 오후 7시 30분 여성'
+          : '안녕하세요! AI 사주 분석 서비스입니다.\n\n' +
             '생년월일시와 성별을 알려주세요.\n' +
             '예: 1994년 10월 3일 오후 7시 30분 여성\n\n' +
-            '한 번 등록하면 다음부터는 바로 질문할 수 있어요!',
-        );
+            '한 번 등록하면 다음부터는 바로 질문할 수 있어요!';
+        await sendMessage(chatId, welcomeMsg, { parseMode: 'Markdown' });
       }
       return NextResponse.json({ ok: true });
     }
