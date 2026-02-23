@@ -9,6 +9,88 @@ import type { Turn } from './kakao-types';
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const MODEL = process.env.OPENAI_MODEL || 'gpt-4.1';
 
+// ===== 일진 계산 (60갑자 기반) =====
+const STEMS = ['갑', '을', '병', '정', '무', '기', '경', '신', '임', '계'];
+const BRANCHES = ['자', '축', '인', '묘', '진', '사', '오', '미', '신', '유', '술', '해'];
+const STEM_HANJA: Record<string, string> = {
+  '갑': '甲', '을': '乙', '병': '丙', '정': '丁', '무': '戊',
+  '기': '己', '경': '庚', '신': '辛', '임': '壬', '계': '癸',
+};
+const BRANCH_HANJA: Record<string, string> = {
+  '자': '子', '축': '丑', '인': '寅', '묘': '卯', '진': '辰', '사': '巳',
+  '오': '午', '미': '未', '신': '申', '유': '酉', '술': '戌', '해': '亥',
+};
+
+/**
+ * 60갑자 기반 일진 계산
+ * 기준일: 2026-02-23 = 무진일 (戊辰)
+ */
+function calculateDayPillar(year: number, month: number, day: number): { stem: string; branch: string; hanja: string } {
+  const referenceDate = new Date(Date.UTC(2026, 1, 23)); // 2026-02-23
+  const referenceStemIndex = 4;  // 무
+  const referenceBranchIndex = 4; // 진
+
+  const targetDate = new Date(Date.UTC(year, month - 1, day));
+  const diffTime = targetDate.getTime() - referenceDate.getTime();
+  const diffDays = Math.round(diffTime / (1000 * 60 * 60 * 24));
+
+  let stemIndex = (referenceStemIndex + diffDays) % 10;
+  let branchIndex = (referenceBranchIndex + diffDays) % 12;
+
+  if (stemIndex < 0) stemIndex += 10;
+  if (branchIndex < 0) branchIndex += 12;
+
+  const stem = STEMS[stemIndex];
+  const branch = BRANCHES[branchIndex];
+  const hanja = `${STEM_HANJA[stem]}${BRANCH_HANJA[branch]}`;
+
+  return { stem, branch, hanja };
+}
+
+function getSeoulDate(): { year: number; month: number; day: number; weekday: string } {
+  const now = new Date();
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Seoul',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    weekday: 'short',
+  }).formatToParts(now);
+
+  const pick = (type: string) => parts.find((p) => p.type === type)?.value ?? '';
+  const weekdayMap: Record<string, string> = {
+    'Mon': '월', 'Tue': '화', 'Wed': '수', 'Thu': '목', 'Fri': '금', 'Sat': '토', 'Sun': '일'
+  };
+
+  return {
+    year: Number(pick('year')),
+    month: Number(pick('month')),
+    day: Number(pick('day')),
+    weekday: weekdayMap[pick('weekday')] || '',
+  };
+}
+
+function getTodayDayPillarInfo(): string {
+  const seoul = getSeoulDate();
+  const today = calculateDayPillar(seoul.year, seoul.month, seoul.day);
+
+  // 향후 5일 일진
+  const upcoming: string[] = [];
+  for (let i = 0; i <= 4; i++) {
+    const futureDate = new Date(Date.UTC(seoul.year, seoul.month - 1, seoul.day + i));
+    const y = futureDate.getUTCFullYear();
+    const m = futureDate.getUTCMonth() + 1;
+    const d = futureDate.getUTCDate();
+    const pillar = calculateDayPillar(y, m, d);
+    const weekdays = ['일', '월', '화', '수', '목', '금', '토'];
+    const wd = weekdays[futureDate.getUTCDay()];
+    upcoming.push(`${m}/${d}(${wd}): ${pillar.stem}${pillar.branch}일(${pillar.hanja}日)`);
+  }
+
+  return `오늘 ${seoul.month}월 ${seoul.day}일(${seoul.weekday})은 *${today.stem}${today.branch}일(${today.hanja}日)*이다.
+향후 일진: ${upcoming.join(', ')}`;
+}
+
 // 메시지 유형 분류
 type MessageType = 'saju_question' | 'casual_chat' | 'meta_question' | 'harmful_request' | 'greeting';
 
@@ -664,9 +746,15 @@ export async function generateReply(
           role: 'system',
           content: `너는 경력 20년 사주 전문가야. 사용자의 질문 뒤에 숨은 진짜 고민을 읽어내는 게 특기야.
 
-## ⚠️ 현재 날짜 (최우선 규칙)
+## ⚠️ 현재 날짜 & 일진 (최우선 규칙 — 절대 변경 금지!)
 오늘은 ${todayString}이다. 현재 연도는 ${todayYear}이다.
 - "올해" = ${todayYear}. 절대로 2024년이나 2025년이 아니다.
+
+**⚠️ 오늘의 일진 (이 정보를 반드시 사용해라!):**
+${getTodayDayPillarInfo()}
+
+일진 관련 질문이 오면 위 정보를 그대로 사용해라. 절대로 다른 일진을 말하지 마라.
+네가 알고 있는 일진 정보는 틀렸을 수 있다. 위에 제공된 일진만 정답이다.
 - "이번 달" = 이 날짜의 월이다.
 
 ## ⚠️ 말투 (가장 중요 — 서비스 퀄리티의 핵심)
