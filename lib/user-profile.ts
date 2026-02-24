@@ -411,8 +411,21 @@ export async function useFreeUnlock(
 }
 
 /**
- * 추천 링크 생성
+ * 텔레그램 추천 링크 생성
  */
 export function buildReferralLink(referralCode: string, botUsername: string = 'SajuSecretaryBot'): string {
   return `https://t.me/${botUsername}?start=ref_${referralCode}`;
+}
+
+/**
+ * 카카오 추천 코드 안내 메시지 생성.
+ * 카카오톡은 딥링크 파라미터가 제한적이므로 추천 코드를 텍스트로 공유한다.
+ */
+export function buildKakaoReferralMessage(referralCode: string): string {
+  return (
+    `나 AI 사주 분석 써보는데 진짜 잘 맞아!\n` +
+    `카카오톡에서 "AI 사주" 채널 추가하고\n` +
+    `"추천 코드 ${referralCode}" 라고 보내면\n` +
+    `무료 열람권 1회 받을 수 있어!`
+  );
 }

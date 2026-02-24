@@ -1,15 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
 import type { KakaoSkillRequest } from '@/lib/kakao-types';
-import { simpleTextResponse, errorResponse } from '@/lib/kakao-response';
-import { getHistory, addTurn } from '@/lib/kakao-history';
-import { generateReply } from '@/lib/kakao-service';
+import { buildCallbackAck } from '@/lib/kakao-callback';
+import { errorResponse } from '@/lib/kakao-response-builder';
+import { handleKakaoMessage } from '@/lib/kakao-handler';
 
 const SKILL_SECRET = process.env.KAKAO_SKILL_SECRET ?? '';
-const TIMEOUT_MS = 4500;
 const ALLOW_METHODS = 'POST, OPTIONS, HEAD';
 
+// Vercel 함수 최대 실행 시간 (초) — callback 비동기 처리를 위해 60초
+export const maxDuration = 60;
+
 function isAuthorized(req: NextRequest): boolean {
-  // secret이 설정되지 않은 경우 통과 (개발 환경)
   if (!SKILL_SECRET) return true;
 
   const headerSecret = req.headers.get('x-skill-secret');
@@ -26,7 +27,6 @@ export async function OPTIONS() {
       'Access-Control-Allow-Headers': 'Content-Type, x-skill-secret, Authorization',
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Credentials': 'true',
-
     },
   });
 }
@@ -36,10 +36,9 @@ export async function HEAD() {
     status: 200,
     headers: {
       Allow: ALLOW_METHODS,
-            'Access-Control-Allow-Methods': ALLOW_METHODS,
-
-            'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Credentials': 'true',
+      'Access-Control-Allow-Methods': ALLOW_METHODS,
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Credentials': 'true',
     },
   });
 }
@@ -52,45 +51,35 @@ export async function POST(req: NextRequest) {
 
   try {
     const body: KakaoSkillRequest = await req.json();
-    const utterance = body?.userRequest?.utterance?.trim() ?? '';
-    const userId = body?.userRequest?.user?.id ?? 'anonymous';
 
-    // 2. 대화 히스토리 로드
-    const history = getHistory(userId);
+    // 2. 핸들러에 위임
+    const { response, needsCallback } = await handleKakaoMessage(body);
 
-    // 3. 사용자 발화 저장
-    addTurn(userId, 'user', utterance);
-
-    // 4. 4.5초 타임아웃으로 답변 생성
-    let reply: string;
-    try {
-      reply = await Promise.race([
-        generateReply(utterance, history),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('TIMEOUT')), TIMEOUT_MS),
-        ),
-      ]);
-    } catch (err) {
-      if (err instanceof Error && err.message === 'TIMEOUT') {
-        reply = '응답 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.';
-      } else {
-        throw err;
-      }
-    }
-
-    // 5. 어시스턴트 답변 저장
-    addTurn(userId, 'assistant', reply);
-
-    // 6. 카카오 포맷으로 반환
-    return NextResponse.json(simpleTextResponse(reply),{
-      headers: {
+    // 3-A. Callback 필요 → useCallback:true 즉시 반환
+    //      비동기 처리는 handleKakaoMessage 내부에서 fire-and-forget으로 이미 시작됨
+    if (needsCallback) {
+      return NextResponse.json(buildCallbackAck(), {
+        headers: {
           'Access-Control-Allow-Origin': '*',
           'Access-Control-Allow-Credentials': 'true',
-      }
+        },
+      });
+    }
+
+    // 3-B. 즉시 응답
+    return NextResponse.json(response ?? errorResponse(), {
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Credentials': 'true',
+      },
     });
   } catch (err) {
     console.error('[kakao/skill] unhandled error:', err);
-    // 에러 시에도 카카오 포맷 200 반환 (오픈빌더 fallback 방지)
-    return NextResponse.json(errorResponse());
+    return NextResponse.json(errorResponse(), {
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Credentials': 'true',
+      },
+    });
   }
 }
