@@ -733,9 +733,17 @@ async function runBackgroundWealthAnalysis(
 
 async function handleCheckResult(userId: string): Promise<KakaoSkillResponse> {
   const dbHist = await getDbHistory(PLATFORM, userId);
-  const lastAssistant = [...dbHist].reverse().find((h) => h.role === 'assistant');
 
-  if (!lastAssistant) {
+  // 마지막 user 메시지의 인덱스를 찾고, 그 이후의 assistant 메시지만 확인.
+  // 이렇게 해야 이전의 오래된 assistant 메시지(인사 등)가 아닌
+  // 방금 요청한 분석 결과만 반환됨.
+  const lastUserIdx = dbHist.map(h => h.role).lastIndexOf('user');
+  const messagesAfterLastUser = lastUserIdx >= 0
+    ? dbHist.slice(lastUserIdx + 1)
+    : [];
+  const newAssistant = messagesAfterLastUser.find(h => h.role === 'assistant');
+
+  if (!newAssistant) {
     return simpleTextResponse(
       '아직 분석이 진행 중이에요.\n\n5초 후에 다시 눌러주세요!',
       [
@@ -746,17 +754,17 @@ async function handleCheckResult(userId: string): Promise<KakaoSkillResponse> {
   }
 
   // 에러 메시지인지 확인
-  if (lastAssistant.content.includes('오류가 발생했어요')) {
+  if (newAssistant.content.includes('오류가 발생했어요')) {
     return simpleTextResponse(
-      lastAssistant.content,
+      newAssistant.content,
       afterProfileQuickReplies(),
     );
   }
 
   // FREE/PREMIUM 파싱
-  const lastUser = [...dbHist].reverse().find((h) => h.role === 'user');
+  const lastUser = dbHist[lastUserIdx];
   const questionContext = lastUser?.content ?? '';
-  const parsed = parseAndFormatFreemium(lastAssistant.content, questionContext);
+  const parsed = parseAndFormatFreemium(newAssistant.content, questionContext);
 
   if (parsed.hasPremium) {
     const freeUnlocks = await getFreeUnlocks(PLATFORM, userId);
@@ -764,7 +772,7 @@ async function handleCheckResult(userId: string): Promise<KakaoSkillResponse> {
     return multiOutputResponse(chunks, premiumQuickReplies(freeUnlocks > 0));
   }
 
-  const formatted = telegramToPlainText(lastAssistant.content);
+  const formatted = telegramToPlainText(newAssistant.content);
   const chunks = splitForKakao(formatted);
   return multiOutputResponse(chunks, afterProfileQuickReplies());
 }
