@@ -228,6 +228,25 @@ export interface DailyFortuneResult {
   };
 }
 
+/**
+ * 외부에서 캐시된 오늘의 운세를 직접 조회.
+ * handleDailyFortune에서 캐시 히트 시 즉시 반환하기 위해 사용.
+ */
+export async function getCachedFortuneDirectly(
+  platform: string,
+  userId: string,
+): Promise<DailyFortuneResult | null> {
+  const seoul = getSeoulDate();
+  const dateStr = `${seoul.year}-${String(seoul.month).padStart(2, '0')}-${String(seoul.day).padStart(2, '0')}`;
+  const cached = await getCachedDailyFortune(platform, userId, dateStr);
+  if (!cached) return null;
+  try {
+    return JSON.parse(cached) as DailyFortuneResult;
+  } catch {
+    return null;
+  }
+}
+
 export async function generateDailyFortune(
   platform: string,
   userId: string,

@@ -89,16 +89,13 @@ export async function handleKakaoMessage(
   const userId = request.userRequest.user?.id ?? 'anonymous';
   const callbackUrl = request.userRequest.callbackUrl;
 
-  // 1. 특수 명령 처리 (항상 즉시 응답)
+  // 1. 특수 명령 처리 (항상 즉시 응답) — DB 호출 없이 빠르게
   if (utterance.startsWith('__')) {
     const response = await handleSpecialCommand(userId, utterance);
     return { response, needsCallback: false };
   }
 
-  // 2. 프로필 확인
-  const profile = await getProfile(PLATFORM, userId);
-
-  // 2.5 Rate limiting — 스팸 방지
+  // 2. 프로필 + 궁합 대기 상태를 병렬 조회 (Supabase 왕복 1회로 단축)
   const spamCheck = checkSpamThrottle(userId);
   if (!spamCheck.allowed) {
     return {
@@ -107,6 +104,11 @@ export async function handleKakaoMessage(
     };
   }
 
+  const [profile, pendingCompat] = await Promise.all([
+    getProfile(PLATFORM, userId),
+    getPendingAction(PLATFORM, userId, 'compatibility'),
+  ]);
+
   // 3. 프로필 없음 → 등록 플로우
   if (!profile) {
     const result = await handleNoProfile(userId, utterance, callbackUrl);
@@ -114,7 +116,6 @@ export async function handleKakaoMessage(
   }
 
   // 4. 궁합 대기 상태 확인
-  const pendingCompat = await getPendingAction(PLATFORM, userId, 'compatibility');
   if (pendingCompat) {
     const result = await handleCompatibilityPending(
       userId,
@@ -132,7 +133,6 @@ export async function handleKakaoMessage(
       question: utterance,
     });
     const partnerRequest = getPartnerProfileRequest();
-    // 마크다운 제거 후 카카오 포맷
     const plainRequest = telegramToPlainText(partnerRequest);
     return {
       response: simpleTextResponse(plainRequest),
@@ -140,19 +140,28 @@ export async function handleKakaoMessage(
     };
   }
 
-  // 5.5 택일 질문 감지
+  // 5.5 택일 질문 감지 → 백그라운드 + 결과 확인 패턴 (동기 처리 시 5초 초과)
   const eventType = isAuspiciousDayQuestion(utterance);
   if (eventType && profile) {
-    return await handleAuspiciousDayQuestion(userId, profile, eventType, utterance);
+    fireBackgroundAuspiciousDay(userId, profile, eventType, utterance);
+    return {
+      response: simpleTextResponse(
+        '택일 분석 중이에요...\n\n5초 후에 아래 버튼을 눌러주세요!',
+        [
+          quickReply('결과 확인', '__check_result__'),
+          quickReply('오늘의 운세', '__cmd_daily__'),
+        ],
+      ),
+      needsCallback: false,
+    };
   }
 
-  // 6. 재물운 질문 감지 → callback 또는 안내
+  // 6. 재물운 질문 감지 → 백그라운드 + 결과 확인 안내
   if (isWealthQuestion(utterance)) {
     if (callbackUrl) {
       fireWealthAnalysis(userId, utterance, callbackUrl, profile);
       return { response: null, needsCallback: true };
     }
-    // callback 없으면 백그라운드 실행 + 결과 확인 안내
     fireBackgroundWealthAnalysis(userId, utterance, profile);
     return {
       response: simpleTextResponse(
@@ -166,7 +175,7 @@ export async function handleKakaoMessage(
     };
   }
 
-  // 6.5 Daily limit check (before analysis)
+  // 6.5 Daily limit check — getUserTier + checkDailyLimit 병렬화
   const tier = await getUserTier(PLATFORM, userId);
   const limitCheck = await checkDailyLimit(PLATFORM, userId, tier);
   if (!limitCheck.allowed) {
@@ -190,7 +199,6 @@ export async function handleKakaoMessage(
   }
 
   // callback 없으면 분석을 백그라운드로 시작하고 즉시 안내 반환
-  // 사용자가 "결과 확인" 버튼을 누르면 DB에서 결과를 조회
   fireBackgroundAnalysis(userId, utterance, profile);
   return {
     response: simpleTextResponse(
@@ -237,6 +245,9 @@ async function handleSpecialCommand(
 
     case '__check_result__':
       return await handleCheckResult(userId);
+
+    case '__check_daily__':
+      return await handleCheckDailyFortune(userId);
 
     case CMD.CMD_DAILY:
       return await handleDailyFortune(userId);
@@ -887,6 +898,7 @@ async function handleDailyFortune(userId: string): Promise<KakaoSkillResponse> {
     );
   }
 
+  // 캐시된 결과가 있으면 즉시 반환 (5초 이내 보장)
   try {
     const birthProfile = {
       year: String(profile.birth_year),
@@ -896,17 +908,29 @@ async function handleDailyFortune(userId: string): Promise<KakaoSkillResponse> {
       minute: String(profile.birth_minute),
       gender: profile.gender as '남성' | '여성',
     };
-    const saju = await calculateSajuFromAPI(birthProfile);
-    const result = await generateDailyFortune(PLATFORM, userId, saju.day[0], saju.fullString);
 
-    const formatted = telegramToPlainText(result.freeSection);
-    const chunks = splitForKakao(formatted);
+    // 캐시 먼저 확인 — 이미 오늘 운세를 생성한 적 있으면 즉시 반환
+    const { getCachedFortuneDirectly } = await import('./daily-fortune');
+    const cached = await getCachedFortuneDirectly(PLATFORM, userId);
+    if (cached) {
+      const formatted = telegramToPlainText(cached.freeSection);
+      const chunks = splitForKakao(formatted);
+      return multiOutputResponse(chunks, [
+        quickReply('시간대별 상세', '__unlock_premium__'),
+        quickReply('택일 분석', '이번주에 좋은 날 알려줘'),
+        quickReply('질문하기', '올해 운세 알려줘'),
+      ]);
+    }
 
-    return multiOutputResponse(chunks, [
-      quickReply('시간대별 상세', '__unlock_premium__'),
-      quickReply('택일 분석', '이번주에 좋은 날 알려줘'),
-      quickReply('질문하기', '올해 운세 알려줘'),
-    ]);
+    // 캐시 없으면 백그라운드에서 생성 시작 + 즉시 안내 반환
+    fireBackgroundDailyFortune(userId, birthProfile);
+    return simpleTextResponse(
+      '오늘의 운세 준비 중이에요...\n\n5초 후에 아래 버튼을 눌러주세요!',
+      [
+        quickReply('운세 확인', '__check_daily__'),
+        quickReply('다른 질문', '올해 운세 알려줘'),
+      ],
+    );
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : '오류';
     return errorResponse(`운세 생성 중 오류: ${msg}`);
@@ -914,42 +938,82 @@ async function handleDailyFortune(userId: string): Promise<KakaoSkillResponse> {
 }
 
 // ==========================================
-// 택일 분석
+// 백그라운드: 오늘의 운세 생성
 // ==========================================
 
-async function handleAuspiciousDayQuestion(
+function fireBackgroundDailyFortune(
+  userId: string,
+  birthProfile: { year: string; month: string; day: string; hour: string; minute: string; gender: '남성' | '여성' },
+): void {
+  (async () => {
+    try {
+      const saju = await calculateSajuFromAPI(birthProfile);
+      await generateDailyFortune(PLATFORM, userId, saju.day[0], saju.fullString);
+      // 결과는 daily_fortune_cache에 저장됨 — __check_daily__에서 조회
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : '알 수 없는 오류';
+      console.error('[kakao-handler] bg daily fortune error:', msg);
+    }
+  })();
+}
+
+async function handleCheckDailyFortune(userId: string): Promise<KakaoSkillResponse> {
+  try {
+    const { getCachedFortuneDirectly } = await import('./daily-fortune');
+    const cached = await getCachedFortuneDirectly(PLATFORM, userId);
+    if (cached) {
+      const formatted = telegramToPlainText(cached.freeSection);
+      const chunks = splitForKakao(formatted);
+      return multiOutputResponse(chunks, [
+        quickReply('시간대별 상세', '__unlock_premium__'),
+        quickReply('택일 분석', '이번주에 좋은 날 알려줘'),
+        quickReply('질문하기', '올해 운세 알려줘'),
+      ]);
+    }
+    return simpleTextResponse(
+      '아직 운세 준비 중이에요.\n\n5초 후에 다시 눌러주세요!',
+      [
+        quickReply('운세 확인', '__check_daily__'),
+        quickReply('다른 질문', '올해 운세 알려줘'),
+      ],
+    );
+  } catch {
+    return errorResponse('운세 조회 중 오류가 발생했어요.');
+  }
+}
+
+// ==========================================
+// 백그라운드: 택일 분석
+// ==========================================
+
+function fireBackgroundAuspiciousDay(
   userId: string,
   profile: UserProfile,
   eventType: EventType,
   utterance: string,
-): Promise<{ response: KakaoSkillResponse | null; needsCallback: boolean }> {
-  try {
-    const birthProfile = {
-      year: String(profile.birth_year),
-      month: String(profile.birth_month),
-      day: String(profile.birth_day),
-      hour: String(profile.birth_hour),
-      minute: String(profile.birth_minute),
-      gender: profile.gender as '남성' | '여성',
-    };
-    const saju = await calculateSajuFromAPI(birthProfile);
-    const results = analyzeAuspiciousDays(saju.day[0], saju.day[1], eventType, 14);
-    const formatted = telegramToPlainText(formatAuspiciousDays(results, eventType));
-    const chunks = splitForKakao(formatted);
+): void {
+  (async () => {
+    try {
+      const birthProfile = {
+        year: String(profile.birth_year),
+        month: String(profile.birth_month),
+        day: String(profile.birth_day),
+        hour: String(profile.birth_hour),
+        minute: String(profile.birth_minute),
+        gender: profile.gender as '남성' | '여성',
+      };
+      const saju = await calculateSajuFromAPI(birthProfile);
+      const results = analyzeAuspiciousDays(saju.day[0], saju.day[1], eventType, 14);
+      const formatted = telegramToPlainText(formatAuspiciousDays(results, eventType));
 
-    await addDbTurn(PLATFORM, userId, 'user', utterance);
-    await addDbTurn(PLATFORM, userId, 'assistant', formatted);
-
-    return {
-      response: multiOutputResponse(chunks, afterProfileQuickReplies()),
-      needsCallback: false,
-    };
-  } catch {
-    return {
-      response: errorResponse('택일 분석 중 오류가 발생했어요.'),
-      needsCallback: false,
-    };
-  }
+      await addDbTurn(PLATFORM, userId, 'user', utterance);
+      await addDbTurn(PLATFORM, userId, 'assistant', formatted);
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : '알 수 없는 오류';
+      console.error('[kakao-handler] bg auspicious day error:', msg);
+      await addDbTurn(PLATFORM, userId, 'assistant', '택일 분석 중 오류가 발생했어요. 다시 시도해주세요!').catch(() => {});
+    }
+  })();
 }
 
 // ==========================================
