@@ -55,6 +55,12 @@ import {
   getPendingAction,
   deletePendingAction,
 } from './pending-actions';
+import { checkSpamThrottle, checkDailyLimit, getUserTier, incrementDailyUsage } from './rate-limiter';
+import { createOrder, buildPaymentUrl, getUserCredits, useCredit } from './payment';
+import type { ProductKey } from './payment';
+import { generateDailyFortune } from './daily-fortune';
+import { isAuspiciousDayQuestion, analyzeAuspiciousDays, formatAuspiciousDays } from './fortune-calendar';
+import type { EventType } from './fortune-calendar';
 
 const PLATFORM = 'kakao' as const;
 
@@ -66,6 +72,9 @@ const CMD = {
   CMD_RESET: '__cmd_reset__',
   CMD_INVITE: '__cmd_invite__',
   CMD_HELP: '__cmd_help__',
+  CMD_DAILY: '__cmd_daily__',
+  CMD_CREDITS: '__cmd_credits__',
+  CMD_SUBSCRIBE: '__cmd_subscribe__',
 } as const;
 
 /**
@@ -87,6 +96,15 @@ export async function handleKakaoMessage(
 
   // 2. 프로필 확인
   const profile = await getProfile(PLATFORM, userId);
+
+  // 2.5 Rate limiting — 스팸 방지
+  const spamCheck = checkSpamThrottle(userId);
+  if (!spamCheck.allowed) {
+    return {
+      response: simpleTextResponse(spamCheck.message ?? '잠시 후 다시 시도해주세요.'),
+      needsCallback: false,
+    };
+  }
 
   // 3. 프로필 없음 → 등록 플로우
   if (!profile) {
@@ -121,6 +139,12 @@ export async function handleKakaoMessage(
     };
   }
 
+  // 5.5 택일 질문 감지
+  const eventType = isAuspiciousDayQuestion(utterance);
+  if (eventType && profile) {
+    return await handleAuspiciousDayQuestion(userId, profile, eventType, utterance);
+  }
+
   // 6. 재물운 질문 감지 → callback
   if (isWealthQuestion(utterance)) {
     if (callbackUrl) {
@@ -129,6 +153,23 @@ export async function handleKakaoMessage(
     }
     // callback 없으면 타임아웃 내 시도
     return await handleWealthSync(userId, utterance, profile);
+  }
+
+  // 6.5 Daily limit check (before analysis)
+  const tier = await getUserTier(PLATFORM, userId);
+  const limitCheck = await checkDailyLimit(PLATFORM, userId, tier);
+  if (!limitCheck.allowed) {
+    return {
+      response: simpleTextResponse(
+        limitCheck.message ?? '오늘 사용 횟수를 모두 사용했어요.',
+        [
+          quickReply('크레딧 충전', '__cmd_credits__'),
+          quickReply('구독하기', '__cmd_subscribe__'),
+          quickReply('오늘의 운세', '__cmd_daily__'),
+        ],
+      ),
+      needsCallback: false,
+    };
   }
 
   // 7. 일반 사주 질문 → callback
@@ -172,6 +213,41 @@ async function handleSpecialCommand(
         defaultQuickReplies(),
       );
 
+    case CMD.CMD_DAILY:
+      return await handleDailyFortune(userId);
+
+    case CMD.CMD_CREDITS:
+      return await handleCreditsInfo(userId);
+
+    case CMD.CMD_SUBSCRIBE:
+      return await handleCreditsInfo(userId);
+
+    // Payment purchase commands
+    case '__buy_credit_10__':
+    case '__buy_credit_30__':
+    case '__buy_monthly_basic__':
+    case '__buy_monthly_premium__': {
+      const productMap: Record<string, string> = {
+        '__buy_credit_10__': 'CREDIT_10',
+        '__buy_credit_30__': 'CREDIT_30',
+        '__buy_monthly_basic__': 'MONTHLY_BASIC',
+        '__buy_monthly_premium__': 'MONTHLY_PREMIUM',
+      };
+      const productKey = productMap[command];
+      if (productKey) {
+        const order = await createOrder(PLATFORM, userId, productKey as ProductKey);
+        if (order) {
+          const url = buildPaymentUrl(order.order_id, productKey as ProductKey);
+          return textCardResponse(
+            '결제 페이지로 이동합니다.',
+            [{ label: '결제하기', action: 'webLink' as const, webLinkUrl: url }],
+            [quickReply('돌아가기', '__cmd_help__')],
+          );
+        }
+      }
+      return errorResponse('결제 처리 중 오류가 발생했어요.');
+    }
+
     default:
       return simpleTextResponse(
         '궁금한 거 있으면 편하게 물어봐!',
@@ -214,19 +290,42 @@ async function handlePremiumUnlock(userId: string): Promise<KakaoSkillResponse> 
     }
   }
 
-  // 무료 열람권도 없고 프리미엄도 아닌 경우
+  // 크레딧 확인
+  const credits = await getUserCredits(PLATFORM, userId);
+  if (credits > 0) {
+    const used = await useCredit(PLATFORM, userId, 'premium_unlock');
+    if (used) {
+      const fullText = stripTagsAndFormat(lastAssistant.content);
+      const chunks = splitForKakao(
+        `[크레딧 사용] (남은 크레딧: ${credits - 1}개)\n\n${fullText}`,
+      );
+      return multiOutputResponse(chunks, afterProfileQuickReplies());
+    }
+  }
+
+  // No credits, no free unlocks — offer payment
+  const order = await createOrder(PLATFORM, userId, 'SINGLE_READING');
+  if (order) {
+    const url = buildPaymentUrl(order.order_id, 'SINGLE_READING');
+    return textCardResponse(
+      '아까 분석에서 시기가 나왔는데...\n\n' +
+        '네가 지금 고민하는 그거,\n' +
+        '언제 움직여야 하는지 정확한 타이밍이 보여.\n\n' +
+        '💎 1,900원으로 핵심 답변을 확인하세요!',
+      [{ label: '💎 핵심 답변 열기 (1,900원)', action: 'webLink' as const, webLinkUrl: url }],
+      [
+        quickReply('크레딧 충전', '__cmd_credits__'),
+        quickReply('친구 초대로 무료', CMD.CMD_INVITE),
+        quickReply('다른 질문', '다른 질문할게'),
+      ],
+      '핵심 답변 미리보기',
+    );
+  }
+
   return textCardResponse(
-    '아까 분석에서 시기가 나왔는데...\n\n' +
-      '네가 지금 고민하는 그거,\n' +
-      '언제 움직여야 하는지 정확한 타이밍이 보여.\n\n' +
-      '결제 시스템 준비 중이에요!\n' +
-      '오픈 시 가장 먼저 알려드릴게요.',
+    '결제 처리 중 오류가 발생했어요. 잠시 후 다시 시도해주세요.',
     undefined,
-    [
-      quickReply('친구 초대로 열람권 받기', CMD.CMD_INVITE),
-      quickReply('다른 질문', '다른 질문할게'),
-    ],
-    '핵심 답변 미리보기',
+    [quickReply('다른 질문', '다른 질문할게')],
   );
 }
 
@@ -513,6 +612,9 @@ function fireGeneralAnalysis(
       // DB에 full 답변 저장
       await addDbTurn(PLATFORM, userId, 'assistant', reply);
 
+      // 일일 사용량 증가 (fire-and-forget)
+      incrementDailyUsage(PLATFORM, userId).catch(() => {});
+
       // 프리미엄 파싱 + 카카오 포맷
       const parsed = parseAndFormatFreemium(reply, utterance);
 
@@ -569,6 +671,9 @@ function fireWealthAnalysis(
       const result = await generateWealthAnalysis(saju, storedBirthProfile, utterance);
 
       await addDbTurn(PLATFORM, userId, 'assistant', result);
+
+      // 일일 사용량 증가 (fire-and-forget)
+      incrementDailyUsage(PLATFORM, userId).catch(() => {});
 
       const parsed = parseAndFormatFreemium(result, utterance);
 
@@ -666,6 +771,113 @@ function fireCompatibilityAnalysis(
       ).catch(() => {});
     }
   })();
+}
+
+// ==========================================
+// 오늘의 운세
+// ==========================================
+
+async function handleDailyFortune(userId: string): Promise<KakaoSkillResponse> {
+  const profile = await getProfile(PLATFORM, userId);
+  if (!profile) {
+    return simpleTextResponse(
+      '오늘의 운세를 보려면 프로필 등록이 필요해요!\n\n예: 1994년 10월 3일 오후 7시 30분 여성',
+    );
+  }
+
+  try {
+    const birthProfile = {
+      year: String(profile.birth_year),
+      month: String(profile.birth_month),
+      day: String(profile.birth_day),
+      hour: String(profile.birth_hour),
+      minute: String(profile.birth_minute),
+      gender: profile.gender as '남성' | '여성',
+    };
+    const saju = await calculateSajuFromAPI(birthProfile);
+    const result = await generateDailyFortune(PLATFORM, userId, saju.day[0], saju.fullString);
+
+    const formatted = telegramToPlainText(result.freeSection);
+    const chunks = splitForKakao(formatted);
+
+    return multiOutputResponse(chunks, [
+      quickReply('시간대별 상세', '__unlock_premium__'),
+      quickReply('택일 분석', '이번주에 좋은 날 알려줘'),
+      quickReply('질문하기', '올해 운세 알려줘'),
+    ]);
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : '오류';
+    return errorResponse(`운세 생성 중 오류: ${msg}`);
+  }
+}
+
+// ==========================================
+// 택일 분석
+// ==========================================
+
+async function handleAuspiciousDayQuestion(
+  userId: string,
+  profile: UserProfile,
+  eventType: EventType,
+  utterance: string,
+): Promise<{ response: KakaoSkillResponse | null; needsCallback: boolean }> {
+  try {
+    const birthProfile = {
+      year: String(profile.birth_year),
+      month: String(profile.birth_month),
+      day: String(profile.birth_day),
+      hour: String(profile.birth_hour),
+      minute: String(profile.birth_minute),
+      gender: profile.gender as '남성' | '여성',
+    };
+    const saju = await calculateSajuFromAPI(birthProfile);
+    const results = analyzeAuspiciousDays(saju.day[0], saju.day[1], eventType, 14);
+    const formatted = telegramToPlainText(formatAuspiciousDays(results, eventType));
+    const chunks = splitForKakao(formatted);
+
+    await addDbTurn(PLATFORM, userId, 'user', utterance);
+    await addDbTurn(PLATFORM, userId, 'assistant', formatted);
+
+    return {
+      response: multiOutputResponse(chunks, afterProfileQuickReplies()),
+      needsCallback: false,
+    };
+  } catch {
+    return {
+      response: errorResponse('택일 분석 중 오류가 발생했어요.'),
+      needsCallback: false,
+    };
+  }
+}
+
+// ==========================================
+// 크레딧/구독 안내
+// ==========================================
+
+async function handleCreditsInfo(userId: string): Promise<KakaoSkillResponse> {
+  const credits = await getUserCredits(PLATFORM, userId);
+  const tier = await getUserTier(PLATFORM, userId);
+
+  let statusMsg = `현재 크레딧: ${credits}개\n`;
+  if (tier === 'premium') statusMsg += '구독: 프리미엄 (무제한)\n';
+  else if (tier === 'basic') statusMsg += '구독: 베이직\n';
+  else statusMsg += '구독: 없음\n';
+
+  return textCardResponse(
+    statusMsg + '\n💎 크레딧 충전\n' +
+    '• 10개: 9,900원\n' +
+    '• 30개: 24,900원 (17% 할인)\n\n' +
+    '💎 월간 구독\n' +
+    '• 베이직: 9,900원/월 (하루 10회)\n' +
+    '• 프리미엄: 19,900원/월 (무제한)',
+    undefined,
+    [
+      quickReply('10크레딧 충전', '__buy_credit_10__'),
+      quickReply('베이직 구독', '__buy_monthly_basic__'),
+      quickReply('프리미엄 구독', '__buy_monthly_premium__'),
+    ],
+    '💎 크레딧 & 구독',
+  );
 }
 
 // ==========================================

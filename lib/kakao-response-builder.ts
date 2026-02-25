@@ -90,27 +90,27 @@ export function quickReply(label: string, messageText: string): KakaoQuickReply 
   return { label, action: 'message', messageText };
 }
 
-/** 기본 메뉴 quickReplies */
+/** 기본 메뉴 quickReplies — 오늘의 운세 추가 */
 export function defaultQuickReplies(): KakaoQuickReply[] {
   return [
+    quickReply('오늘의 운세', '__cmd_daily__'),
     quickReply('사주 분석', '사주 분석해줘'),
     quickReply('궁합 보기', '궁합 분석해줘'),
     quickReply('재물운', '재물운 알려줘'),
-    quickReply('내 프로필', '__cmd_profile__'),
   ];
 }
 
-/** 프로필 등록 후 quickReplies */
+/** 프로필 등록 후 quickReplies — 택일 추가 */
 export function afterProfileQuickReplies(): KakaoQuickReply[] {
   return [
-    quickReply('올해 운세', '올해 운세 알려줘'),
+    quickReply('오늘의 운세', '__cmd_daily__'),
     quickReply('연애운', '올해 연애운 어때?'),
     quickReply('재물운', '이번 달 재물운'),
-    quickReply('궁합 보기', '궁합 분석해줘'),
+    quickReply('택일', '이번주에 면접 보기 좋은 날'),
   ];
 }
 
-/** 프리미엄 언락 quickReplies */
+/** 프리미엄 언락 quickReplies — 크레딧 추가 */
 export function premiumQuickReplies(hasFreeUnlocks: boolean): KakaoQuickReply[] {
   const replies: KakaoQuickReply[] = [
     quickReply('핵심 답변 열기', '__unlock_premium__'),
@@ -118,6 +118,7 @@ export function premiumQuickReplies(hasFreeUnlocks: boolean): KakaoQuickReply[] 
   if (hasFreeUnlocks) {
     replies.push(quickReply('무료 열람권 사용', '__use_free_unlock__'));
   }
+  replies.push(quickReply('크레딧 충전', '__cmd_credits__'));
   replies.push(quickReply('다른 질문하기', '다른 질문할게'));
   return replies;
 }

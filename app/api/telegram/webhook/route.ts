@@ -30,12 +30,12 @@ import {
   isWealthQuestion,
   generateWealthAnalysis,
 } from '@/lib/wealth-analysis';
-
-// 궁합 대기 상태 (userId -> 대기중)
-const compatibilityPending = new Map<string, { requestedAt: number; question: string }>();
-
-// 추천 코드 대기 상태 (userId -> referralCode)
-const pendingReferrals = new Map<string, string>();
+import {
+  setPendingAction,
+  getPendingAction,
+  deletePendingAction,
+} from '@/lib/pending-actions';
+import { checkSpamThrottle, checkDailyLimit, getUserTier, incrementDailyUsage } from '@/lib/rate-limiter';
 
 const INTERIM_TIMEOUT_MS = 3000;
 
@@ -87,6 +87,10 @@ const COMPAT_PROGRESS_STAGES = [
   { pct: 25, label: '일간 관계 분석 중' },
   { pct: 40, label: '지지 충합 확인 중' },
   { pct: 55, label: '오행 보완 분석 중' },
+  { pct: 70, label: '궁합 점수 계산 중' },
+  { pct: 85, label: '관계 풀이 작성 중' },
+  { pct: 95, label: '거의 다 됐어 💕' },
+];
 
 const WEALTH_PROGRESS_STAGES = [
   { pct: 10, label: '재성 구조 분석 중' },
@@ -96,10 +100,6 @@ const WEALTH_PROGRESS_STAGES = [
   { pct: 70, label: '투자 타이밍 계산 중' },
   { pct: 85, label: '재물 전략 수립 중' },
   { pct: 95, label: '거의 다 됐어 💰' },
-];
-  { pct: 70, label: '궁합 점수 계산 중' },
-  { pct: 85, label: '관계 풀이 작성 중' },
-  { pct: 95, label: '거의 다 됐어 💕' },
 ];
 
 const PROGRESS_INTERVAL_MS = 2000;
@@ -537,6 +537,13 @@ async function handleMessage(
   displayName: string,
 ) {
   try {
+    // 0. Rate limiting — 스팸 방지
+    const spamCheck = checkSpamThrottle(userId);
+    if (!spamCheck.allowed) {
+      await sendMessage(chatId, spamCheck.message ?? '잠시 후 다시 시도해주세요.');
+      return;
+    }
+
     // 1. 저장된 프로필 확인
     const profile = await getProfile('telegram', userId);
 
@@ -608,10 +615,11 @@ async function handleMessage(
       const saved = await tryParseAndSaveProfile(userId, utterance, displayName);
       if (saved) {
         // 추천 코드 처리 (대기 중인 경우)
-        const pendingRefCode = pendingReferrals.get(userId);
+        const pendingRef = await getPendingAction('telegram', userId, 'referral');
+        const pendingRefCode = pendingRef?.payload?.code as string | undefined;
         let referralBonus = '';
         if (pendingRefCode) {
-          pendingReferrals.delete(userId);
+          await deletePendingAction('telegram', userId, 'referral');
           const result = await processReferral('telegram', userId, pendingRefCode);
           if (result.success) {
             referralBonus = '\n\n🎁 *친구 추천 보상!* 무료 열람권 1회가 지급되었어요!';
@@ -691,12 +699,13 @@ async function handleMessage(
     }
 
     // 6. 궁합 분석 플로우
-    const pendingCompat = compatibilityPending.get(userId);
+    const pendingCompat = await getPendingAction('telegram', userId, 'compatibility');
     if (pendingCompat) {
       // 상대방 프로필 대기 중 — 파싱 시도
       const partnerParsed = extractAndValidateProfile(utterance);
       if (partnerParsed) {
-        compatibilityPending.delete(userId);
+        const compatQuestion = (pendingCompat.payload?.question as string) ?? '';
+        await deletePendingAction('telegram', userId, 'compatibility');
 
         // 진행률 표시 시작
         const compatHeader = '💕 *궁합 분석 중...*';
@@ -748,7 +757,7 @@ async function handleMessage(
             partnerSaju,
             myProfile,
             partnerProfile,
-            pendingCompat.question,
+            compatQuestion,
           );
 
           // 진행률 정리
@@ -783,7 +792,7 @@ async function handleMessage(
           }
 
           // DB에 저장
-          await addDbTurn('telegram', userId, 'user', `궁합 질문: ${pendingCompat.question}`);
+          await addDbTurn('telegram', userId, 'user', `궁합 질문: ${compatQuestion}`);
           await addDbTurn('telegram', userId, 'assistant', result);
         } catch (err) {
           clearInterval(compatProgressInterval);
@@ -806,7 +815,7 @@ async function handleMessage(
 
     // 궁합 질문 감지 → 상대방 프로필 요청
     if (isCompatibilityQuestion(utterance)) {
-      compatibilityPending.set(userId, { requestedAt: Date.now(), question: utterance });
+      await setPendingAction('telegram', userId, 'compatibility', { question: utterance });
       await sendMessage(chatId, getPartnerProfileRequest(), { parseMode: 'Markdown' });
       return;
     }
@@ -1053,9 +1062,10 @@ export async function POST(req: NextRequest) {
       // 추천 코드 파싱: /start ref_XXXXXX
       const refMatch = utterance.match(/\/start\s+ref_([A-Z0-9]+)/i);
       if (refMatch && !profile) {
-        // 신규 사용자 + 추천 코드 있음 → 임시 저장 (프로필 등록 후 처리)
-        // 추천 코드를 메모리에 저장 (추후 프로필 저장 시 처리)
-        pendingReferrals.set(userId, refMatch[1].toUpperCase());
+        // 신규 사용자 + 추천 코드 있음 → Supabase에 저장 (프로필 등록 후 처리)
+        await setPendingAction('telegram', userId, 'referral', {
+          code: refMatch[1].toUpperCase(),
+        });
       }
 
       if (profile) {
