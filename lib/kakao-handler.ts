@@ -65,6 +65,12 @@ import type { EventType } from './fortune-calendar';
 
 const PLATFORM = 'kakao' as const;
 
+/**
+ * 특수 명령(handleSpecialCommand)에서 백그라운드 작업이 필요할 때 저장.
+ * handleKakaoMessage에서 이 값을 backgroundTask로 옮겨 route에서 after()로 실행.
+ */
+let _lastBackgroundTask: (() => Promise<void>) | null = null;
+
 // --- 특수 명령 prefix ---
 const CMD = {
   UNLOCK_PREMIUM: '__unlock_premium__',
@@ -82,17 +88,27 @@ const CMD = {
  * 즉시 응답이 가능한 경우 KakaoSkillResponse를 반환.
  * 비동기 처리가 필요하면 callback을 fire하고 null을 반환 (route에서 useCallback:true).
  */
+export interface HandleResult {
+  response: KakaoSkillResponse | null;
+  needsCallback: boolean;
+  /** 응답 반환 후 실행해야 할 백그라운드 작업. route에서 after()로 실행. */
+  backgroundTask?: () => Promise<void>;
+}
+
 export async function handleKakaoMessage(
   request: KakaoSkillRequest,
-): Promise<{ response: KakaoSkillResponse | null; needsCallback: boolean }> {
+): Promise<HandleResult> {
   const utterance = request.userRequest.utterance?.trim() ?? '';
   const userId = request.userRequest.user?.id ?? 'anonymous';
   const callbackUrl = request.userRequest.callbackUrl;
 
   // 1. 특수 명령 처리 (항상 즉시 응답) — DB 호출 없이 빠르게
   if (utterance.startsWith('__')) {
+    _lastBackgroundTask = null;
     const response = await handleSpecialCommand(userId, utterance);
-    return { response, needsCallback: false };
+    const bgTask = _lastBackgroundTask;
+    _lastBackgroundTask = null;
+    return { response, needsCallback: false, backgroundTask: bgTask ?? undefined };
   }
 
   // 2. 프로필 + 궁합 대기 상태를 병렬 조회 (Supabase 왕복 1회로 단축)
@@ -143,7 +159,6 @@ export async function handleKakaoMessage(
   // 5.5 택일 질문 감지 → 백그라운드 + 결과 확인 패턴 (동기 처리 시 5초 초과)
   const eventType = isAuspiciousDayQuestion(utterance);
   if (eventType && profile) {
-    fireBackgroundAuspiciousDay(userId, profile, eventType, utterance);
     return {
       response: simpleTextResponse(
         '택일 분석 중이에요...\n\n5초 후에 아래 버튼을 눌러주세요!',
@@ -153,16 +168,19 @@ export async function handleKakaoMessage(
         ],
       ),
       needsCallback: false,
+      backgroundTask: () => runBackgroundAuspiciousDay(userId, profile, eventType, utterance),
     };
   }
 
   // 6. 재물운 질문 감지 → 백그라운드 + 결과 확인 안내
   if (isWealthQuestion(utterance)) {
     if (callbackUrl) {
-      fireWealthAnalysis(userId, utterance, callbackUrl, profile);
-      return { response: null, needsCallback: true };
+      return {
+        response: null,
+        needsCallback: true,
+        backgroundTask: () => runWealthAnalysisCallback(userId, utterance, callbackUrl, profile),
+      };
     }
-    fireBackgroundWealthAnalysis(userId, utterance, profile);
     return {
       response: simpleTextResponse(
         '재물운 깊이 분석 중이에요...\n\n10초 정도 후에 아래 버튼을 눌러주세요!',
@@ -172,6 +190,7 @@ export async function handleKakaoMessage(
         ],
       ),
       needsCallback: false,
+      backgroundTask: () => runBackgroundWealthAnalysis(userId, utterance, profile),
     };
   }
 
@@ -194,12 +213,14 @@ export async function handleKakaoMessage(
 
   // 7. 일반 사주 질문 → callback 또는 안내
   if (callbackUrl) {
-    fireGeneralAnalysis(userId, utterance, callbackUrl, profile);
-    return { response: null, needsCallback: true };
+    return {
+      response: null,
+      needsCallback: true,
+      backgroundTask: () => runGeneralAnalysisCallback(userId, utterance, callbackUrl, profile),
+    };
   }
 
   // callback 없으면 분석을 백그라운드로 시작하고 즉시 안내 반환
-  fireBackgroundAnalysis(userId, utterance, profile);
   return {
     response: simpleTextResponse(
       '사주 깊이 읽는 중이에요...\n\n10초 정도 후에 아래 버튼을 눌러주세요!',
@@ -209,6 +230,7 @@ export async function handleKakaoMessage(
       ],
     ),
     needsCallback: false,
+    backgroundTask: () => runBackgroundAnalysis(userId, utterance, profile),
   };
 }
 
@@ -400,7 +422,7 @@ async function handleNoProfile(
   userId: string,
   utterance: string,
   callbackUrl?: string,
-): Promise<{ response: KakaoSkillResponse | null; needsCallback: boolean }> {
+): Promise<HandleResult> {
   // 추천 코드 감지
   const refMatch = utterance.match(/추천\s*코드\s*([A-Z0-9]{4,8})/i);
   if (refMatch) {
@@ -440,8 +462,15 @@ async function handleNoProfile(
       };
     }
 
-    // 추천 코드 처리 (fire-and-forget — 응답 지연 방지)
-    (async () => {
+    const confirmMsg =
+      `프로필을 저장했어요!\n\n` +
+      `생년월일: ${saved.birth_year}년 ${saved.birth_month}월 ${saved.birth_day}일\n` +
+      `시간: ${saved.birth_hour}시 ${saved.birth_minute}분\n` +
+      `성별: ${saved.gender}\n\n` +
+      `이제 사주 분석을 받을 수 있어요!`;
+
+    // 추천 코드 처리를 backgroundTask로 전달 (after()에서 실행)
+    const referralTask = async () => {
       try {
         const pendingRef = await getPendingAction(PLATFORM, userId, 'referral');
         if (pendingRef) {
@@ -450,16 +479,7 @@ async function handleNoProfile(
           await processReferral(PLATFORM, userId, code);
         }
       } catch { /* 무시 */ }
-    })();
-
-    // 프로필 저장 확인만 즉시 반환 (5초 이내 보장)
-    // 첫 분석은 사용자가 "오늘의 운세" 등 다음 액션을 누를 때 시작
-    const confirmMsg =
-      `프로필을 저장했어요!\n\n` +
-      `생년월일: ${saved.birth_year}년 ${saved.birth_month}월 ${saved.birth_day}일\n` +
-      `시간: ${saved.birth_hour}시 ${saved.birth_minute}분\n` +
-      `성별: ${saved.gender}\n\n` +
-      `이제 사주 분석을 받을 수 있어요!`;
+    };
 
     return {
       response: simpleTextResponse(
@@ -472,6 +492,7 @@ async function handleNoProfile(
         ],
       ),
       needsCallback: false,
+      backgroundTask: referralTask,
     };
   }
 
@@ -497,8 +518,7 @@ async function handleCompatibilityPending(
   callbackUrl: string | undefined,
   profile: UserProfile,
   pendingPayload: { question: string },
-): Promise<{ response: KakaoSkillResponse | null; needsCallback: boolean }> {
-  // 상대방 프로필 파싱 시도
+): Promise<HandleResult> {
   const partnerParsed = extractAndValidateProfile(utterance);
   if (!partnerParsed) {
     return {
@@ -512,340 +532,203 @@ async function handleCompatibilityPending(
   await deletePendingAction(PLATFORM, userId, 'compatibility');
 
   if (callbackUrl) {
-    fireCompatibilityAnalysis(
-      userId,
-      callbackUrl,
-      profile,
-      partnerParsed,
-      pendingPayload.question,
-    );
-    return { response: null, needsCallback: true };
+    return {
+      response: null,
+      needsCallback: true,
+      backgroundTask: () => runCompatibilityCallback(userId, callbackUrl, profile, partnerParsed, pendingPayload.question),
+    };
   }
 
-  // callback 없으면 시도 (타임아웃 가능성 높음)
-  return await handleCompatibilitySync(userId, profile, partnerParsed, pendingPayload.question);
+  // callback 없으면 백그라운드 + 결과 확인 패턴
+  return {
+    response: simpleTextResponse(
+      '궁합 깊이 분석 중이에요...\n\n10초 정도 후에 아래 버튼을 눌러주세요!',
+      [
+        quickReply('결과 확인', '__check_result__'),
+        quickReply('오늘의 운세', '__cmd_daily__'),
+      ],
+    ),
+    needsCallback: false,
+    backgroundTask: () => runBackgroundCompatibility(userId, profile, partnerParsed, pendingPayload.question),
+  };
 }
 
 // ==========================================
-// Callback 비동기 처리 (fire-and-forget)
+// 백그라운드 작업 (route에서 after()로 실행)
 // ==========================================
 
-function fireFirstReading(
-  userId: string,
-  profile: UserProfile,
-  callbackUrl: string,
-  confirmMsg: string,
-): void {
-  (async () => {
-    try {
-      const birthProfile = {
-        year: String(profile.birth_year),
-        month: String(profile.birth_month),
-        day: String(profile.birth_day),
-        hour: String(profile.birth_hour),
-        minute: String(profile.birth_minute),
-        gender: profile.gender as '남성' | '여성',
-      };
-
-      const firstReading = await generateFirstReading(birthProfile, profile.display_name ?? undefined);
-      const formatted = telegramToPlainText(firstReading);
-
-      await addDbTurn(PLATFORM, userId, 'assistant', firstReading);
-
-      const fullText = `${confirmMsg}\n\n${'─'.repeat(20)}\n\n${formatted}`;
-      const chunks = splitForKakao(fullText);
-
-      await sendCallbackResponse(
-        callbackUrl,
-        multiOutputResponse(chunks, afterProfileQuickReplies()),
-      );
-    } catch (error: unknown) {
-      const msg = error instanceof Error ? error.message : '알 수 없는 오류';
-      console.error('[kakao-handler] firstReading callback error:', msg);
-      await sendCallbackResponse(
-        callbackUrl,
-        errorResponse(`분석 중 오류가 발생했어요: ${msg}`),
-      ).catch(() => {});
-    }
-  })();
+function makeBirthProfile(profile: UserProfile) {
+  return {
+    year: String(profile.birth_year),
+    month: String(profile.birth_month),
+    day: String(profile.birth_day),
+    hour: String(profile.birth_hour),
+    minute: String(profile.birth_minute),
+    gender: profile.gender as '남성' | '여성',
+  };
 }
 
-function fireGeneralAnalysis(
+async function runGeneralAnalysisCallback(
   userId: string,
   utterance: string,
   callbackUrl: string,
   profile: UserProfile,
-): void {
-  (async () => {
-    try {
-      const storedBirthProfile = {
-        year: String(profile.birth_year),
-        month: String(profile.birth_month),
-        day: String(profile.birth_day),
-        hour: String(profile.birth_hour),
-        minute: String(profile.birth_minute),
-        gender: profile.gender as '남성' | '여성',
-      };
+): Promise<void> {
+  try {
+    const storedBirthProfile = makeBirthProfile(profile);
+    const dbHistory = await getDbHistory(PLATFORM, userId);
+    const history = dbHistory.map((h) => ({
+      role: h.role as 'user' | 'assistant',
+      content: h.content,
+      timestamp: Date.now(),
+    }));
+    await addDbTurn(PLATFORM, userId, 'user', utterance);
+    trackInterest(PLATFORM, userId, utterance).catch(() => {});
 
-      // DB 히스토리 로드 + 사용자 발화 저장
-      const dbHistory = await getDbHistory(PLATFORM, userId);
-      const history = dbHistory.map((h) => ({
-        role: h.role as 'user' | 'assistant',
-        content: h.content,
-        timestamp: Date.now(),
-      }));
-      await addDbTurn(PLATFORM, userId, 'user', utterance);
+    const reply = await generateReply(utterance, history, storedBirthProfile);
+    await addDbTurn(PLATFORM, userId, 'assistant', reply);
+    incrementDailyUsage(PLATFORM, userId).catch(() => {});
 
-      // 관심사 추적 (fire-and-forget)
-      trackInterest(PLATFORM, userId, utterance).catch((err) =>
-        console.error('[kakao-handler] trackInterest error:', err),
-      );
-
-      const reply = await generateReply(utterance, history, storedBirthProfile);
-
-      // DB에 full 답변 저장
-      await addDbTurn(PLATFORM, userId, 'assistant', reply);
-
-      // 일일 사용량 증가 (fire-and-forget)
-      incrementDailyUsage(PLATFORM, userId).catch(() => {});
-
-      // 프리미엄 파싱 + 카카오 포맷
-      const parsed = parseAndFormatFreemium(reply, utterance);
-
-      if (parsed.hasPremium) {
-        const freeUnlocks = await getFreeUnlocks(PLATFORM, userId);
-        const chunks = splitForKakao(parsed.displayText);
-        await sendCallbackResponse(
-          callbackUrl,
-          multiOutputResponse(chunks, premiumQuickReplies(freeUnlocks > 0)),
-        );
-      } else {
-        const formatted = telegramToPlainText(reply);
-        const chunks = splitForKakao(formatted);
-        await sendCallbackResponse(
-          callbackUrl,
-          multiOutputResponse(chunks, afterProfileQuickReplies()),
-        );
-      }
-    } catch (error: unknown) {
-      const msg = error instanceof Error ? error.message : '알 수 없는 오류';
-      console.error('[kakao-handler] generalAnalysis callback error:', msg);
-      await sendCallbackResponse(
-        callbackUrl,
-        errorResponse(`분석 중 오류가 발생했어요: ${msg}`),
-      ).catch(() => {});
+    const parsed = parseAndFormatFreemium(reply, utterance);
+    if (parsed.hasPremium) {
+      const freeUnlocks = await getFreeUnlocks(PLATFORM, userId);
+      const chunks = splitForKakao(parsed.displayText);
+      await sendCallbackResponse(callbackUrl, multiOutputResponse(chunks, premiumQuickReplies(freeUnlocks > 0)));
+    } else {
+      const formatted = telegramToPlainText(reply);
+      const chunks = splitForKakao(formatted);
+      await sendCallbackResponse(callbackUrl, multiOutputResponse(chunks, afterProfileQuickReplies()));
     }
-  })();
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : '알 수 없는 오류';
+    console.error('[kakao-handler] generalAnalysis callback error:', msg);
+    await sendCallbackResponse(callbackUrl, errorResponse(`분석 중 오류가 발생했어요: ${msg}`)).catch(() => {});
+  }
 }
 
-function fireWealthAnalysis(
+async function runWealthAnalysisCallback(
   userId: string,
   utterance: string,
   callbackUrl: string,
   profile: UserProfile,
-): void {
-  (async () => {
-    try {
-      const storedBirthProfile = {
-        year: String(profile.birth_year),
-        month: String(profile.birth_month),
-        day: String(profile.birth_day),
-        hour: String(profile.birth_hour),
-        minute: String(profile.birth_minute),
-        gender: profile.gender as '남성' | '여성',
-      };
+): Promise<void> {
+  try {
+    const storedBirthProfile = makeBirthProfile(profile);
+    await addDbTurn(PLATFORM, userId, 'user', utterance);
+    trackInterest(PLATFORM, userId, utterance).catch(() => {});
 
-      await addDbTurn(PLATFORM, userId, 'user', utterance);
+    const saju = await calculateSajuFromAPI(storedBirthProfile);
+    const result = await generateWealthAnalysis(saju, storedBirthProfile, utterance);
+    await addDbTurn(PLATFORM, userId, 'assistant', result);
+    incrementDailyUsage(PLATFORM, userId).catch(() => {});
 
-      trackInterest(PLATFORM, userId, utterance).catch((err) =>
-        console.error('[kakao-handler] trackInterest error:', err),
-      );
-
-      const saju = await calculateSajuFromAPI(storedBirthProfile);
-      const result = await generateWealthAnalysis(saju, storedBirthProfile, utterance);
-
-      await addDbTurn(PLATFORM, userId, 'assistant', result);
-
-      // 일일 사용량 증가 (fire-and-forget)
-      incrementDailyUsage(PLATFORM, userId).catch(() => {});
-
-      const parsed = parseAndFormatFreemium(result, utterance);
-
-      if (parsed.hasPremium) {
-        const freeUnlocks = await getFreeUnlocks(PLATFORM, userId);
-        const chunks = splitForKakao(parsed.displayText);
-        await sendCallbackResponse(
-          callbackUrl,
-          multiOutputResponse(chunks, premiumQuickReplies(freeUnlocks > 0)),
-        );
-      } else {
-        const formatted = telegramToPlainText(result);
-        const chunks = splitForKakao(formatted);
-        await sendCallbackResponse(
-          callbackUrl,
-          multiOutputResponse(chunks, afterProfileQuickReplies()),
-        );
-      }
-    } catch (error: unknown) {
-      const msg = error instanceof Error ? error.message : '알 수 없는 오류';
-      console.error('[kakao-handler] wealthAnalysis callback error:', msg);
-      await sendCallbackResponse(
-        callbackUrl,
-        errorResponse(`재물운 분석 중 오류가 발생했어요: ${msg}`),
-      ).catch(() => {});
+    const parsed = parseAndFormatFreemium(result, utterance);
+    if (parsed.hasPremium) {
+      const freeUnlocks = await getFreeUnlocks(PLATFORM, userId);
+      const chunks = splitForKakao(parsed.displayText);
+      await sendCallbackResponse(callbackUrl, multiOutputResponse(chunks, premiumQuickReplies(freeUnlocks > 0)));
+    } else {
+      const formatted = telegramToPlainText(result);
+      const chunks = splitForKakao(formatted);
+      await sendCallbackResponse(callbackUrl, multiOutputResponse(chunks, afterProfileQuickReplies()));
     }
-  })();
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : '알 수 없는 오류';
+    console.error('[kakao-handler] wealthAnalysis callback error:', msg);
+    await sendCallbackResponse(callbackUrl, errorResponse(`재물운 분석 중 오류가 발생했어요: ${msg}`)).catch(() => {});
+  }
 }
 
-function fireCompatibilityAnalysis(
+async function runCompatibilityCallback(
   userId: string,
   callbackUrl: string,
   profile: UserProfile,
   partnerParsed: { year: string; month: string; day: string; hour: string; minute: string; gender: '남성' | '여성' },
   question: string,
-): void {
-  (async () => {
-    try {
-      const myProfile = {
-        year: String(profile.birth_year),
-        month: String(profile.birth_month),
-        day: String(profile.birth_day),
-        hour: String(profile.birth_hour),
-        minute: String(profile.birth_minute),
-        gender: profile.gender as '남성' | '여성',
-      };
-      const partnerProfile = {
-        year: partnerParsed.year,
-        month: partnerParsed.month,
-        day: partnerParsed.day,
-        hour: partnerParsed.hour ?? '12',
-        minute: partnerParsed.minute ?? '0',
-        gender: partnerParsed.gender,
-      };
+): Promise<void> {
+  try {
+    const myProfile = makeBirthProfile(profile);
+    const partnerProfile = {
+      year: partnerParsed.year,
+      month: partnerParsed.month,
+      day: partnerParsed.day,
+      hour: partnerParsed.hour ?? '12',
+      minute: partnerParsed.minute ?? '0',
+      gender: partnerParsed.gender,
+    };
+    const [mySaju, partnerSaju] = await Promise.all([
+      calculateSajuFromAPI(myProfile),
+      calculateSajuFromAPI(partnerProfile),
+    ]);
+    const result = await generateCompatibilityAnalysis(mySaju, partnerSaju, myProfile, partnerProfile, question);
+    await addDbTurn(PLATFORM, userId, 'user', `궁합 질문: ${question}`);
+    await addDbTurn(PLATFORM, userId, 'assistant', result);
 
-      const [mySaju, partnerSaju] = await Promise.all([
-        calculateSajuFromAPI(myProfile),
-        calculateSajuFromAPI(partnerProfile),
-      ]);
-
-      const result = await generateCompatibilityAnalysis(
-        mySaju,
-        partnerSaju,
-        myProfile,
-        partnerProfile,
-        question,
-      );
-
-      await addDbTurn(PLATFORM, userId, 'user', `궁합 질문: ${question}`);
-      await addDbTurn(PLATFORM, userId, 'assistant', result);
-
-      const parsed = parseAndFormatFreemium(result, question);
-
-      if (parsed.hasPremium) {
-        const freeUnlocks = await getFreeUnlocks(PLATFORM, userId);
-        const chunks = splitForKakao(parsed.displayText);
-        await sendCallbackResponse(
-          callbackUrl,
-          multiOutputResponse(chunks, premiumQuickReplies(freeUnlocks > 0)),
-        );
-      } else {
-        const formatted = telegramToPlainText(result);
-        const chunks = splitForKakao(formatted);
-        await sendCallbackResponse(
-          callbackUrl,
-          multiOutputResponse(chunks, afterProfileQuickReplies()),
-        );
-      }
-    } catch (error: unknown) {
-      const msg = error instanceof Error ? error.message : '알 수 없는 오류';
-      console.error('[kakao-handler] compatibility callback error:', msg);
-      await sendCallbackResponse(
-        callbackUrl,
-        errorResponse(`궁합 분석 중 오류가 발생했어요: ${msg}`),
-      ).catch(() => {});
+    const parsed = parseAndFormatFreemium(result, question);
+    if (parsed.hasPremium) {
+      const freeUnlocks = await getFreeUnlocks(PLATFORM, userId);
+      const chunks = splitForKakao(parsed.displayText);
+      await sendCallbackResponse(callbackUrl, multiOutputResponse(chunks, premiumQuickReplies(freeUnlocks > 0)));
+    } else {
+      const formatted = telegramToPlainText(result);
+      const chunks = splitForKakao(formatted);
+      await sendCallbackResponse(callbackUrl, multiOutputResponse(chunks, afterProfileQuickReplies()));
     }
-  })();
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : '알 수 없는 오류';
+    console.error('[kakao-handler] compatibility callback error:', msg);
+    await sendCallbackResponse(callbackUrl, errorResponse(`궁합 분석 중 오류가 발생했어요: ${msg}`)).catch(() => {});
+  }
 }
-
-// ==========================================
-// 백그라운드 분석 (callback 없을 때)
-// ==========================================
 
 /**
- * callback URL 없이 분석을 백그라운드에서 실행.
- * 결과는 DB conversation_history에 저장되고,
- * 사용자가 "__check_result__" 버튼을 누르면 조회.
+ * 백그라운드 사주 분석 (callback 없을 때).
+ * 결과는 DB에 저장되고, __check_result__ 버튼으로 조회.
  */
-function fireBackgroundAnalysis(
+async function runBackgroundAnalysis(
   userId: string,
   utterance: string,
   profile: UserProfile,
-): void {
-  (async () => {
-    try {
-      const storedBirthProfile = {
-        year: String(profile.birth_year),
-        month: String(profile.birth_month),
-        day: String(profile.birth_day),
-        hour: String(profile.birth_hour),
-        minute: String(profile.birth_minute),
-        gender: profile.gender as '남성' | '여성',
-      };
+): Promise<void> {
+  try {
+    const storedBirthProfile = makeBirthProfile(profile);
+    const dbHistory = await getDbHistory(PLATFORM, userId);
+    const history = dbHistory.map((h) => ({
+      role: h.role as 'user' | 'assistant',
+      content: h.content,
+      timestamp: Date.now(),
+    }));
+    await addDbTurn(PLATFORM, userId, 'user', utterance);
+    trackInterest(PLATFORM, userId, utterance).catch(() => {});
 
-      const dbHistory = await getDbHistory(PLATFORM, userId);
-      const history = dbHistory.map((h) => ({
-        role: h.role as 'user' | 'assistant',
-        content: h.content,
-        timestamp: Date.now(),
-      }));
-      await addDbTurn(PLATFORM, userId, 'user', utterance);
-
-      trackInterest(PLATFORM, userId, utterance).catch(() => {});
-
-      const reply = await generateReply(utterance, history, storedBirthProfile);
-      await addDbTurn(PLATFORM, userId, 'assistant', reply);
-      incrementDailyUsage(PLATFORM, userId).catch(() => {});
-    } catch (error: unknown) {
-      const msg = error instanceof Error ? error.message : '알 수 없는 오류';
-      console.error('[kakao-handler] background analysis error:', msg);
-      // 에러 발생 시에도 사용자에게 에러 메시지를 DB에 저장
-      await addDbTurn(
-        PLATFORM,
-        userId,
-        'assistant',
-        '분석 중 오류가 발생했어요. 다시 질문해주세요!',
-      ).catch(() => {});
-    }
-  })();
+    const reply = await generateReply(utterance, history, storedBirthProfile);
+    await addDbTurn(PLATFORM, userId, 'assistant', reply);
+    incrementDailyUsage(PLATFORM, userId).catch(() => {});
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : '알 수 없는 오류';
+    console.error('[kakao-handler] background analysis error:', msg);
+    await addDbTurn(PLATFORM, userId, 'assistant', '분석 중 오류가 발생했어요. 다시 질문해주세요!').catch(() => {});
+  }
 }
 
-function fireBackgroundWealthAnalysis(
+async function runBackgroundWealthAnalysis(
   userId: string,
   utterance: string,
   profile: UserProfile,
-): void {
-  (async () => {
-    try {
-      const storedBirthProfile = {
-        year: String(profile.birth_year),
-        month: String(profile.birth_month),
-        day: String(profile.birth_day),
-        hour: String(profile.birth_hour),
-        minute: String(profile.birth_minute),
-        gender: profile.gender as '남성' | '여성',
-      };
-      await addDbTurn(PLATFORM, userId, 'user', utterance);
-      trackInterest(PLATFORM, userId, utterance).catch(() => {});
-      const saju = await calculateSajuFromAPI(storedBirthProfile);
-      const result = await generateWealthAnalysis(saju, storedBirthProfile, utterance);
-      await addDbTurn(PLATFORM, userId, 'assistant', result);
-      incrementDailyUsage(PLATFORM, userId).catch(() => {});
-    } catch (error: unknown) {
-      const msg = error instanceof Error ? error.message : '알 수 없는 오류';
-      console.error('[kakao-handler] bg wealth analysis error:', msg);
-      await addDbTurn(PLATFORM, userId, 'assistant', '재물운 분석 중 오류가 발생했어요. 다시 시도해주세요!').catch(() => {});
-    }
-  })();
+): Promise<void> {
+  try {
+    const storedBirthProfile = makeBirthProfile(profile);
+    await addDbTurn(PLATFORM, userId, 'user', utterance);
+    trackInterest(PLATFORM, userId, utterance).catch(() => {});
+    const saju = await calculateSajuFromAPI(storedBirthProfile);
+    const result = await generateWealthAnalysis(saju, storedBirthProfile, utterance);
+    await addDbTurn(PLATFORM, userId, 'assistant', result);
+    incrementDailyUsage(PLATFORM, userId).catch(() => {});
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : '알 수 없는 오류';
+    console.error('[kakao-handler] bg wealth analysis error:', msg);
+    await addDbTurn(PLATFORM, userId, 'assistant', '재물운 분석 중 오류가 발생했어요. 다시 시도해주세요!').catch(() => {});
+  }
 }
 
 async function handleCheckResult(userId: string): Promise<KakaoSkillResponse> {
@@ -923,7 +806,10 @@ async function handleDailyFortune(userId: string): Promise<KakaoSkillResponse> {
     }
 
     // 캐시 없으면 백그라운드에서 생성 시작 + 즉시 안내 반환
-    fireBackgroundDailyFortune(userId, birthProfile);
+    // 캐시 없으면 백그라운드 생성을 시작하고 즉시 안내 반환.
+    // handleDailyFortune은 handleSpecialCommand에서 호출되므로,
+    // 백그라운드 작업은 _lastBackgroundTask에 저장하여 route 레벨에서 after()로 실행.
+    _lastBackgroundTask = () => runBackgroundDailyFortune(userId, birthProfile);
     return simpleTextResponse(
       '오늘의 운세 준비 중이에요...\n\n5초 후에 아래 버튼을 눌러주세요!',
       [
@@ -941,20 +827,17 @@ async function handleDailyFortune(userId: string): Promise<KakaoSkillResponse> {
 // 백그라운드: 오늘의 운세 생성
 // ==========================================
 
-function fireBackgroundDailyFortune(
+async function runBackgroundDailyFortune(
   userId: string,
   birthProfile: { year: string; month: string; day: string; hour: string; minute: string; gender: '남성' | '여성' },
-): void {
-  (async () => {
-    try {
-      const saju = await calculateSajuFromAPI(birthProfile);
-      await generateDailyFortune(PLATFORM, userId, saju.day[0], saju.fullString);
-      // 결과는 daily_fortune_cache에 저장됨 — __check_daily__에서 조회
-    } catch (error: unknown) {
-      const msg = error instanceof Error ? error.message : '알 수 없는 오류';
-      console.error('[kakao-handler] bg daily fortune error:', msg);
-    }
-  })();
+): Promise<void> {
+  try {
+    const saju = await calculateSajuFromAPI(birthProfile);
+    await generateDailyFortune(PLATFORM, userId, saju.day[0], saju.fullString);
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : '알 수 없는 오류';
+    console.error('[kakao-handler] bg daily fortune error:', msg);
+  }
 }
 
 async function handleCheckDailyFortune(userId: string): Promise<KakaoSkillResponse> {
@@ -986,34 +869,25 @@ async function handleCheckDailyFortune(userId: string): Promise<KakaoSkillRespon
 // 백그라운드: 택일 분석
 // ==========================================
 
-function fireBackgroundAuspiciousDay(
+async function runBackgroundAuspiciousDay(
   userId: string,
   profile: UserProfile,
   eventType: EventType,
   utterance: string,
-): void {
-  (async () => {
-    try {
-      const birthProfile = {
-        year: String(profile.birth_year),
-        month: String(profile.birth_month),
-        day: String(profile.birth_day),
-        hour: String(profile.birth_hour),
-        minute: String(profile.birth_minute),
-        gender: profile.gender as '남성' | '여성',
-      };
-      const saju = await calculateSajuFromAPI(birthProfile);
-      const results = analyzeAuspiciousDays(saju.day[0], saju.day[1], eventType, 14);
-      const formatted = telegramToPlainText(formatAuspiciousDays(results, eventType));
+): Promise<void> {
+  try {
+    const birthProfile = makeBirthProfile(profile);
+    const saju = await calculateSajuFromAPI(birthProfile);
+    const results = analyzeAuspiciousDays(saju.day[0], saju.day[1], eventType, 14);
+    const formatted = telegramToPlainText(formatAuspiciousDays(results, eventType));
 
-      await addDbTurn(PLATFORM, userId, 'user', utterance);
-      await addDbTurn(PLATFORM, userId, 'assistant', formatted);
-    } catch (error: unknown) {
-      const msg = error instanceof Error ? error.message : '알 수 없는 오류';
-      console.error('[kakao-handler] bg auspicious day error:', msg);
-      await addDbTurn(PLATFORM, userId, 'assistant', '택일 분석 중 오류가 발생했어요. 다시 시도해주세요!').catch(() => {});
-    }
-  })();
+    await addDbTurn(PLATFORM, userId, 'user', utterance);
+    await addDbTurn(PLATFORM, userId, 'assistant', formatted);
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : '알 수 없는 오류';
+    console.error('[kakao-handler] bg auspicious day error:', msg);
+    await addDbTurn(PLATFORM, userId, 'assistant', '택일 분석 중 오류가 발생했어요. 다시 시도해주세요!').catch(() => {});
+  }
 }
 
 // ==========================================
@@ -1039,54 +913,33 @@ async function handleCreditsInfo(userId: string): Promise<KakaoSkillResponse> {
 // Sync 대안 (callback 없는 경우)
 // ==========================================
 
-async function handleCompatibilitySync(
+async function runBackgroundCompatibility(
   userId: string,
   profile: UserProfile,
   partnerParsed: { year: string; month: string; day: string; hour: string; minute: string; gender: '남성' | '여성' },
   question: string,
-): Promise<{ response: KakaoSkillResponse | null; needsCallback: boolean }> {
-  // callback 없으면 백그라운드 실행 + 결과 확인 안내
-  (async () => {
-    try {
-      const myProfile = {
-        year: String(profile.birth_year),
-        month: String(profile.birth_month),
-        day: String(profile.birth_day),
-        hour: String(profile.birth_hour),
-        minute: String(profile.birth_minute),
-        gender: profile.gender as '남성' | '여성',
-      };
-      const partnerProfile = {
-        year: partnerParsed.year,
-        month: partnerParsed.month,
-        day: partnerParsed.day,
-        hour: partnerParsed.hour ?? '12',
-        minute: partnerParsed.minute ?? '0',
-        gender: partnerParsed.gender,
-      };
-      const [mySaju, partnerSaju] = await Promise.all([
-        calculateSajuFromAPI(myProfile),
-        calculateSajuFromAPI(partnerProfile),
-      ]);
-      const result = await generateCompatibilityAnalysis(
-        mySaju, partnerSaju, myProfile, partnerProfile, question,
-      );
-      await addDbTurn(PLATFORM, userId, 'user', `궁합 질문: ${question}`);
-      await addDbTurn(PLATFORM, userId, 'assistant', result);
-    } catch (err: unknown) {
-      console.error('[kakao-handler] bg compatibility error:', err);
-      await addDbTurn(PLATFORM, userId, 'assistant', '궁합 분석 중 오류가 발생했어요. 다시 시도해주세요!').catch(() => {});
-    }
-  })();
-
-  return {
-    response: simpleTextResponse(
-      '궁합 깊이 분석 중이에요...\n\n10초 정도 후에 아래 버튼을 눌러주세요!',
-      [
-        quickReply('결과 확인', '__check_result__'),
-        quickReply('오늘의 운세', '__cmd_daily__'),
-      ],
-    ),
-    needsCallback: false,
-  };
+): Promise<void> {
+  try {
+    const myProfile = makeBirthProfile(profile);
+    const partnerProfile = {
+      year: partnerParsed.year,
+      month: partnerParsed.month,
+      day: partnerParsed.day,
+      hour: partnerParsed.hour ?? '12',
+      minute: partnerParsed.minute ?? '0',
+      gender: partnerParsed.gender,
+    };
+    const [mySaju, partnerSaju] = await Promise.all([
+      calculateSajuFromAPI(myProfile),
+      calculateSajuFromAPI(partnerProfile),
+    ]);
+    const result = await generateCompatibilityAnalysis(
+      mySaju, partnerSaju, myProfile, partnerProfile, question,
+    );
+    await addDbTurn(PLATFORM, userId, 'user', `궁합 질문: ${question}`);
+    await addDbTurn(PLATFORM, userId, 'assistant', result);
+  } catch (err: unknown) {
+    console.error('[kakao-handler] bg compatibility error:', err);
+    await addDbTurn(PLATFORM, userId, 'assistant', '궁합 분석 중 오류가 발생했어요. 다시 시도해주세요!').catch(() => {});
+  }
 }
