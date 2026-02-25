@@ -5,7 +5,7 @@ import { calculateYukchin, analyzeSajuYukchin } from './yukchin';
 import { analyzeYearLuck, getYearPillar, getMonthPillar } from './saju-luck';
 
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const MODEL = process.env.OPENAI_MODEL || 'gpt-4.1';
+const MODEL = process.env.OPENAI_MODEL || 'gpt-4.1-mini';
 
 interface BirthProfile {
   year: string;
@@ -357,7 +357,7 @@ export async function generateWealthAnalysis(
   const response = await client.chat.completions.create({
     model: MODEL,
     temperature: 0.8,
-    max_completion_tokens: 2000,
+    max_completion_tokens: 1000,
     messages: [
       {
         role: 'system',

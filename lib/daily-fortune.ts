@@ -15,7 +15,7 @@ import OpenAI from 'openai';
 import { supabase } from './supabase';
 
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const MODEL = process.env.OPENAI_MODEL || 'gpt-4.1';
+const MODEL = process.env.OPENAI_MODEL || 'gpt-4.1-mini';
 
 // === 일진 계산 (kakao-service.ts와 동일 로직) ===
 const STEMS = ['갑', '을', '병', '정', '무', '기', '경', '신', '임', '계'];
