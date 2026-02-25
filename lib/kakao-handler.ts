@@ -56,8 +56,9 @@ import {
   deletePendingAction,
 } from './pending-actions';
 import { checkSpamThrottle, checkDailyLimit, getUserTier, incrementDailyUsage } from './rate-limiter';
-import { createOrder, buildPaymentUrl, getUserCredits, useCredit } from './payment';
-import type { ProductKey } from './payment';
+// 결제 모듈 — Toss 승인 후 활성화 예정
+// import { createOrder, buildPaymentUrl, getUserCredits, useCredit } from './payment';
+// import type { ProductKey } from './payment';
 import { generateDailyFortune } from './daily-fortune';
 import { isAuspiciousDayQuestion, analyzeAuspiciousDays, formatAuspiciousDays } from './fortune-calendar';
 import type { EventType } from './fortune-calendar';
@@ -246,30 +247,18 @@ async function handleSpecialCommand(
     case CMD.CMD_SUBSCRIBE:
       return await handleCreditsInfo(userId);
 
-    // Payment purchase commands
+    // Payment purchase commands — Toss 승인 후 활성화 예정
     case '__buy_credit_10__':
     case '__buy_credit_30__':
     case '__buy_monthly_basic__':
     case '__buy_monthly_premium__': {
-      const productMap: Record<string, string> = {
-        '__buy_credit_10__': 'CREDIT_10',
-        '__buy_credit_30__': 'CREDIT_30',
-        '__buy_monthly_basic__': 'MONTHLY_BASIC',
-        '__buy_monthly_premium__': 'MONTHLY_PREMIUM',
-      };
-      const productKey = productMap[command];
-      if (productKey) {
-        const order = await createOrder(PLATFORM, userId, productKey as ProductKey);
-        if (order) {
-          const url = buildPaymentUrl(order.order_id, productKey as ProductKey);
-          return textCardResponse(
-            '결제 페이지로 이동합니다.',
-            [{ label: '결제하기', action: 'webLink' as const, webLinkUrl: url }],
-            [quickReply('돌아가기', '__cmd_help__')],
-          );
-        }
-      }
-      return errorResponse('결제 처리 중 오류가 발생했어요.');
+      return simpleTextResponse(
+        '결제 시스템을 준비하고 있어요!\n곧 오픈할 예정이니 조금만 기다려주세요.',
+        [
+          quickReply('친구 초대로 무료', CMD.CMD_INVITE),
+          quickReply('오늘의 운세', '__cmd_daily__'),
+        ],
+      );
     }
 
     default:
@@ -314,42 +303,14 @@ async function handlePremiumUnlock(userId: string): Promise<KakaoSkillResponse> 
     }
   }
 
-  // 크레딧 확인
-  const credits = await getUserCredits(PLATFORM, userId);
-  if (credits > 0) {
-    const used = await useCredit(PLATFORM, userId, 'premium_unlock');
-    if (used) {
-      const fullText = stripTagsAndFormat(lastAssistant.content);
-      const chunks = splitForKakao(
-        `[크레딧 사용] (남은 크레딧: ${credits - 1}개)\n\n${fullText}`,
-      );
-      return multiOutputResponse(chunks, afterProfileQuickReplies());
-    }
-  }
-
-  // No credits, no free unlocks — offer payment
-  const order = await createOrder(PLATFORM, userId, 'SINGLE_READING');
-  if (order) {
-    const url = buildPaymentUrl(order.order_id, 'SINGLE_READING');
-    return textCardResponse(
-      '아까 분석에서 시기가 나왔는데...\n\n' +
-        '네가 지금 고민하는 그거,\n' +
-        '언제 움직여야 하는지 정확한 타이밍이 보여.\n\n' +
-        '💎 1,900원으로 핵심 답변을 확인하세요!',
-      [{ label: '💎 핵심 답변 열기 (1,900원)', action: 'webLink' as const, webLinkUrl: url }],
-      [
-        quickReply('크레딧 충전', '__cmd_credits__'),
-        quickReply('친구 초대로 무료', CMD.CMD_INVITE),
-        quickReply('다른 질문', '다른 질문할게'),
-      ],
-      '핵심 답변 미리보기',
-    );
-  }
-
-  return textCardResponse(
-    '결제 처리 중 오류가 발생했어요. 잠시 후 다시 시도해주세요.',
-    undefined,
-    [quickReply('다른 질문', '다른 질문할게')],
+  // 결제 시스템 준비 중 — 친구 초대로 무료 열람권 안내
+  return simpleTextResponse(
+    '핵심 답변을 보려면 열람권이 필요해요!\n\n' +
+      '친구를 초대하면 무료 열람권을 받을 수 있어요.',
+    [
+      quickReply('친구 초대하기', CMD.CMD_INVITE),
+      quickReply('다른 질문', '다른 질문할게'),
+    ],
   );
 }
 
@@ -996,28 +957,17 @@ async function handleAuspiciousDayQuestion(
 // ==========================================
 
 async function handleCreditsInfo(userId: string): Promise<KakaoSkillResponse> {
-  const credits = await getUserCredits(PLATFORM, userId);
-  const tier = await getUserTier(PLATFORM, userId);
+  const freeUnlocks = await getFreeUnlocks(PLATFORM, userId);
 
-  let statusMsg = `현재 크레딧: ${credits}개\n`;
-  if (tier === 'premium') statusMsg += '구독: 프리미엄 (무제한)\n';
-  else if (tier === 'basic') statusMsg += '구독: 베이직\n';
-  else statusMsg += '구독: 없음\n';
-
-  return textCardResponse(
-    statusMsg + '\n💎 크레딧 충전\n' +
-    '• 10개: 9,900원\n' +
-    '• 30개: 24,900원 (17% 할인)\n\n' +
-    '💎 월간 구독\n' +
-    '• 베이직: 9,900원/월 (하루 10회)\n' +
-    '• 프리미엄: 19,900원/월 (무제한)',
-    undefined,
+  return simpleTextResponse(
+    `내 무료 열람권: ${freeUnlocks}회\n\n` +
+    '결제 시스템이 곧 오픈됩니다!\n' +
+    '지금은 친구 초대로 무료 열람권을 받을 수 있어요.',
     [
-      quickReply('10크레딧 충전', '__buy_credit_10__'),
-      quickReply('베이직 구독', '__buy_monthly_basic__'),
-      quickReply('프리미엄 구독', '__buy_monthly_premium__'),
+      quickReply('친구 초대하기', CMD.CMD_INVITE),
+      quickReply('오늘의 운세', '__cmd_daily__'),
+      quickReply('다른 질문', '다른 질문할게'),
     ],
-    '💎 크레딧 & 구독',
   );
 }
 
