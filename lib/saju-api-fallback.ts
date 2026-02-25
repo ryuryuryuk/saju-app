@@ -63,11 +63,15 @@ async function getCachedPillars(cacheKey: string): Promise<SajuPillars | null> {
 
 async function cachePillars(cacheKey: string, pillars: SajuPillars): Promise<void> {
   if (!supabase) return;
-  await supabase.from('saju_pillar_cache').upsert({
-    cache_key: cacheKey,
-    pillars,
-    created_at: new Date().toISOString(),
-  }, { onConflict: 'cache_key' }).catch(() => {});
+  try {
+    await supabase.from('saju_pillar_cache').upsert({
+      cache_key: cacheKey,
+      pillars,
+      created_at: new Date().toISOString(),
+    }, { onConflict: 'cache_key' });
+  } catch {
+    // silently ignore cache write failures
+  }
 }
 
 // === Simplified local calculation (fallback) ===
