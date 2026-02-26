@@ -26,6 +26,7 @@ import {
   generateFirstReading,
   extractAndValidateProfile,
   calculateSajuFromAPI,
+  classifyMessage,
 } from './kakao-service';
 import {
   getProfile,
@@ -129,6 +130,43 @@ export async function handleKakaoMessage(
   if (!profile) {
     const result = await handleNoProfile(userId, utterance, callbackUrl);
     return result;
+  }
+
+  // 3.5 일상 대화 / 인사 → 즉시 응답 (백그라운드 분석 불필요, 사용 횟수 미차감)
+  const msgType = classifyMessage(utterance);
+  if (msgType === 'greeting' || msgType === 'casual_chat' || msgType === 'meta_question' || msgType === 'harmful_request') {
+    // harmful은 정적 응답, 나머지는 GPT 대화
+    if (msgType === 'harmful_request') {
+      return {
+        response: simpleTextResponse(
+          '그런 이야기는 내가 도와줄 수 없어. 혹시 힘든 일 있으면 전문 상담을 받아봐.\n자살예방상담전화 1393\n정신건강위기상담전화 1577-0199',
+        ),
+        needsCallback: false,
+      };
+    }
+
+    const storedBirthProfile = makeBirthProfile(profile);
+    const dbHistory = await getDbHistory(PLATFORM, userId);
+    const history = dbHistory.map((h) => ({
+      role: h.role as 'user' | 'assistant',
+      content: h.content,
+      timestamp: Date.now(),
+    }));
+
+    const reply = await generateReply(utterance, history, storedBirthProfile);
+    const plainReply = telegramToPlainText(reply);
+
+    // DB에 대화 기록 저장 (after로 비동기 처리)
+    const saveTurns = async () => {
+      await addDbTurn(PLATFORM, userId, 'user', utterance);
+      await addDbTurn(PLATFORM, userId, 'assistant', reply);
+    };
+
+    return {
+      response: simpleTextResponse(plainReply, afterProfileQuickReplies()),
+      needsCallback: false,
+      backgroundTask: saveTurns,
+    };
   }
 
   // 4. 궁합 대기 상태 확인
