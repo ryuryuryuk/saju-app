@@ -261,15 +261,7 @@ interface SajuPillars {
   fullString: string;
 }
 
-const STEM_ALIASES: Record<string, string> = {
-  갑: '갑', 을: '을', 병: '병', 정: '정', 무: '무', 기: '기', 경: '경', 신: '신', 임: '임', 계: '계',
-  甲: '갑', 乙: '을', 丙: '병', 丁: '정', 戊: '무', 己: '기', 庚: '경', 辛: '신', 壬: '임', 癸: '계',
-};
-
-const BRANCH_ALIASES: Record<string, string> = {
-  자: '자', 축: '축', 인: '인', 묘: '묘', 진: '진', 사: '사', 오: '오', 미: '미', 신: '신', 유: '유', 술: '술', 해: '해',
-  子: '자', 丑: '축', 寅: '인', 卯: '묘', 辰: '진', 巳: '사', 午: '오', 未: '미', 申: '신', 酉: '유', 戌: '술', 亥: '해',
-};
+// STEM_ALIASES, BRANCH_ALIASES, normalizePillar removed — now handled by saju-api-fallback.ts
 
 function to24Hour(hour: number, meridiem?: string): number {
   if (!meridiem) return hour;
@@ -371,32 +363,6 @@ function validateProfile(input: Partial<BirthProfile>): BirthProfile | null {
     minute: String(minute),
     gender: input.gender as Gender,
   };
-}
-
-function normalizePillar(rawValue: string): string {
-  const cleaned = (rawValue ?? '').trim().replace(/\s+/g, '');
-  if (!cleaned) return '';
-
-  const chars = [...cleaned];
-  let stem: string | null = null;
-  let branch: string | null = null;
-
-  for (const ch of chars) {
-    if (!stem && STEM_ALIASES[ch]) {
-      stem = STEM_ALIASES[ch];
-      continue;
-    }
-    if (stem && !branch && BRANCH_ALIASES[ch]) {
-      branch = BRANCH_ALIASES[ch];
-      break;
-    }
-  }
-
-  if (!stem || !branch) {
-    throw new Error(`천간/지지 파싱 실패 (받은 값: "${rawValue}")`);
-  }
-
-  return `${stem}${branch}`;
 }
 
 // calculateSajuFromAPI replaced by calculateSajuWithFallback (cache + local fallback)

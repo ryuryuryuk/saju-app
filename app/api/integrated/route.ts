@@ -134,29 +134,15 @@ async function calculateSajuFromAPI(
   minute: string,
   gender: string,
 ): Promise<SajuPillars> {
-  const params = new URLSearchParams({
-    y: year,
-    m: month,
-    d: day,
-    hh: hour,
-    mm: minute ?? '0',
-    calendar: 'solar',
-    gender: gender === '여성' ? '여' : '남',
+  const { calculateSajuWithFallback } = await import('@/lib/saju-api-fallback');
+  return calculateSajuWithFallback({
+    year,
+    month,
+    day,
+    hour,
+    minute: minute ?? '0',
+    gender: gender === '여성' ? '여성' : '남성',
   });
-
-  const response = await fetch(`https://beta-ybz6.onrender.com/api/saju?${params}`);
-  if (!response.ok) {
-    throw new Error('사주 계산 API 오류');
-  }
-
-  const data = await response.json();
-  return {
-    year: data.pillars.year,
-    month: data.pillars.month,
-    day: data.pillars.day,
-    hour: data.pillars.hour,
-    fullString: `${data.pillars.year}년 ${data.pillars.month}월 ${data.pillars.day}일 ${data.pillars.hour}시`,
-  };
 }
 
 // ---------------------------------------------------------------------------

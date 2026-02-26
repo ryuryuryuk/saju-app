@@ -122,26 +122,36 @@ export async function incrementDailyUsage(
     day: '2-digit',
   }).format(new Date());
 
-  const { data: existing } = await supabase
-    .from('daily_usage')
-    .select('id, count')
-    .eq('platform', platform)
-    .eq('platform_user_id', userId)
-    .eq('date', kstDate)
-    .single();
-
-  if (existing) {
-    await supabase
-      .from('daily_usage')
-      .update({ count: existing.count + 1 })
-      .eq('id', existing.id);
-  } else {
-    await supabase.from('daily_usage').insert({
-      platform,
-      platform_user_id: userId,
-      date: kstDate,
-      count: 1,
+  // Atomic upsert: avoids race condition with concurrent requests
+  try {
+    await supabase.rpc('increment_daily_usage', {
+      p_platform: platform,
+      p_user_id: userId,
+      p_date: kstDate,
     });
+  } catch {
+    // Fallback: non-atomic insert/update if RPC not available
+    const { data: existing } = await supabase
+      .from('daily_usage')
+      .select('id, count')
+      .eq('platform', platform)
+      .eq('platform_user_id', userId)
+      .eq('date', kstDate)
+      .single();
+
+    if (existing) {
+      await supabase
+        .from('daily_usage')
+        .update({ count: existing.count + 1 })
+        .eq('id', existing.id);
+    } else {
+      await supabase.from('daily_usage').insert({
+        platform,
+        platform_user_id: userId,
+        date: kstDate,
+        count: 1,
+      });
+    }
   }
 }
 

@@ -22,39 +22,18 @@ const STEM_SEQUENCE = ['갑', '을', '병', '정', '무', '기', '경', '신', '
 const BRANCH_SEQUENCE = ['자', '축', '인', '묘', '진', '사', '오', '미', '신', '유', '술', '해'];
 
 /**
- * 외부 사주 API 호출
+ * 사주 계산 — cache + local fallback (외부 API 의존 최소화)
  */
 async function calculateSajuFromAPI(year, month, day, hour, minute, gender) {
-  try {
-    const params = new URLSearchParams({
-      y: year,
-      m: month,
-      d: day,
-      hh: hour,
-      mm: minute ?? '0',
-      calendar: 'solar',
-      gender: gender === '여성' ? '여' : '남',
-    });
-
-    const response = await fetch(`https://beta-ybz6.onrender.com/api/saju?${params}`);
-
-    if (!response.ok) {
-      throw new Error('사주 계산 API 오류');
-    }
-
-    const data = await response.json();
-
-    return {
-      year: data.pillars.year,
-      month: data.pillars.month,
-      day: data.pillars.day,
-      hour: data.pillars.hour,
-      fullString: `${data.pillars.year}년 ${data.pillars.month}월 ${data.pillars.day}일 ${data.pillars.hour}시`,
-    };
-  } catch (error) {
-    console.error('사주 API 호출 오류:', error);
-    throw new Error('사주 계산에 실패했습니다. 잠시 후 다시 시도해주세요.');
-  }
+  const { calculateSajuWithFallback } = await import('@/lib/saju-api-fallback');
+  return calculateSajuWithFallback({
+    year: String(year),
+    month: String(month),
+    day: String(day),
+    hour: String(hour),
+    minute: String(minute ?? '0'),
+    gender: gender === '여성' ? '여성' : '남성',
+  });
 }
 
 function normalizePillar(value) {

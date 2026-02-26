@@ -86,27 +86,19 @@ interface UserSajuResult {
 }
 
 async function calculateSajuPillars(profile: BirthProfile): Promise<UserSajuResult> {
-  const params = new URLSearchParams({
-    y: String(profile.birth_year),
-    m: String(profile.birth_month),
-    d: String(profile.birth_day),
-    hh: String(profile.birth_hour),
-    mm: String(profile.birth_minute),
-    calendar: 'solar',
-    gender: profile.gender === '여성' ? '여' : '남',
+  const { calculateSajuWithFallback } = await import('@/lib/saju-api-fallback');
+  const pillars = await calculateSajuWithFallback({
+    year: String(profile.birth_year),
+    month: String(profile.birth_month),
+    day: String(profile.birth_day),
+    hour: String(profile.birth_hour),
+    minute: String(profile.birth_minute),
+    gender: profile.gender === '여성' ? '여성' : '남성',
   });
 
-  const response = await fetch(`https://beta-ybz6.onrender.com/api/saju?${params}`);
-  if (!response.ok) {
-    throw new Error('사주 원국 계산 실패');
-  }
-
-  const data = await response.json();
-  const dayPillar = data.pillars.day;
-
   return {
-    fullString: `${data.pillars.year}년 ${data.pillars.month}월 ${data.pillars.day}일 ${data.pillars.hour}시`,
-    dayStem: dayPillar[0],
+    fullString: pillars.fullString,
+    dayStem: pillars.day[0],
   };
 }
 
